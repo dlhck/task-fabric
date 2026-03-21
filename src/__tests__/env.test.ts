@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { loadEnv } from "../env.ts";
+import { loadEnv, resolveRepoUrl } from "../env.ts";
 
 describe("loadEnv", () => {
   test("throws when TASKS_DIR is missing", () => {
@@ -72,5 +72,22 @@ describe("loadEnv", () => {
       if (origPort) process.env.PORT = origPort;
       else delete process.env.PORT;
     }
+  });
+});
+
+describe("resolveRepoUrl", () => {
+  test("injects token into HTTPS URL", () => {
+    const result = resolveRepoUrl("https://github.com/user/repo.git", "ghp_abc123");
+    expect(result).toBe("https://ghp_abc123@github.com/user/repo.git");
+  });
+
+  test("returns URL unchanged when no token", () => {
+    const url = "https://github.com/user/repo.git";
+    expect(resolveRepoUrl(url)).toBe(url);
+    expect(resolveRepoUrl(url, undefined)).toBe(url);
+  });
+
+  test("returns non-URL strings unchanged when token provided", () => {
+    expect(resolveRepoUrl("git@github.com:user/repo.git", "token")).toBe("git@github.com:user/repo.git");
   });
 });

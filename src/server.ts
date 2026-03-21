@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { loadEnv } from "./env.ts";
+import { loadEnv, resolveRepoUrl } from "./env.ts";
 import { initStore, reindex, embedAll, closeStore, type Store } from "./store.ts";
 import { initGit } from "./git.ts";
 import { readSettings } from "./settings.ts";
@@ -47,9 +47,14 @@ export async function createServer() {
   // Clone or init git
   let git: SimpleGit;
   if (env.TASKS_REPO_URL) {
+    const cloneUrl = resolveRepoUrl(env.TASKS_REPO_URL, env.GIT_TOKEN);
     const exists = await Bun.file(path.join(tasksDir, ".git/HEAD")).exists();
     if (!exists) {
-      await simpleGit().clone(env.TASKS_REPO_URL, tasksDir);
+      await simpleGit().clone(cloneUrl, tasksDir);
+    } else if (env.GIT_TOKEN) {
+      // Update remote URL with token in case it changed
+      const g = simpleGit(tasksDir);
+      await g.remote(["set-url", "origin", cloneUrl]);
     }
     git = simpleGit(tasksDir);
     try { await git.pull({ "--rebase": null }); } catch { /* offline ok */ }
