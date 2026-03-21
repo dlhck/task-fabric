@@ -39,12 +39,7 @@ export async function createServer() {
   const tasksDir = env.TASKS_DIR;
   const apiKey = env.API_KEY;
 
-  // Ensure status directories exist
-  for (const status of TASK_STATUSES) {
-    await mkdir(path.join(tasksDir, status), { recursive: true });
-  }
-
-  // Clone or init git
+  // Clone or init git (before creating dirs, since clone needs an empty target)
   let git: SimpleGit;
   if (env.TASKS_REPO_URL) {
     const cloneUrl = resolveRepoUrl(env.TASKS_REPO_URL, env.GIT_TOKEN);
@@ -52,7 +47,6 @@ export async function createServer() {
     if (!exists) {
       await simpleGit().clone(cloneUrl, tasksDir);
     } else if (env.GIT_TOKEN) {
-      // Update remote URL with token in case it changed
       const g = simpleGit(tasksDir);
       await g.remote(["set-url", "origin", cloneUrl]);
     }
@@ -60,6 +54,11 @@ export async function createServer() {
     try { await git.pull({ "--rebase": null }); } catch { /* offline ok */ }
   } else {
     git = await initGit(tasksDir);
+  }
+
+  // Ensure status directories exist (after clone so they don't block it)
+  for (const status of TASK_STATUSES) {
+    await mkdir(path.join(tasksDir, status), { recursive: true });
   }
 
   // Init store
