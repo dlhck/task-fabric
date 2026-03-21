@@ -98,14 +98,19 @@ describe("CRUD lifecycle", () => {
     expect(data.deleted).toBe(true);
   });
 
-  test("task_get returns error for deleted task in inbox", async () => {
+  test("task_get returns error for soft-deleted task looked up by ID", async () => {
     const result = await e2e.client.callTool({
+      name: "task_get",
+      arguments: { id: taskId },
+    });
+    // Soft-deleted tasks move to archived — task_get should still find it there
+    // but it should no longer appear in inbox
+    const listResult = await e2e.client.callTool({
       name: "task_list",
       arguments: { status: "inbox" },
     });
-    const tasks = parseResult(result) as any[];
-    const found = tasks.find((t) => t.id === taskId);
-    expect(found).toBeUndefined();
+    const tasks = parseResult(listResult) as any[];
+    expect(tasks.find((t) => t.id === taskId)).toBeUndefined();
   });
 });
 

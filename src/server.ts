@@ -25,7 +25,7 @@ import {
   taskCreateSchema, taskGetSchema, taskUpdateSchema, taskDeleteSchema, taskListSchema,
   taskSearchSchema, taskQuerySchema,
   taskMoveSchema, taskLogSchema, taskLinkSchema, taskBatchSchema,
-  taskDashboardSchema, taskTimelineSchema, taskGraphSchema,
+  taskDashboardSchema, taskTimelineSchema,
   syncHistorySchema, syncDiffSchema, syncRestoreSchema,
   settingsUpdateSchema,
 } from "./tools/schemas.ts";
@@ -198,8 +198,8 @@ export async function createServer() {
       return { content: [{ type: "text", text: JSON.stringify(timeline) }] };
     });
 
-    mcp.registerTool("task_graph", { description: "Get dependency graph", inputSchema: taskGraphSchema }, async (params) => {
-      const graph = await taskGraph(ctx, params);
+    mcp.registerTool("task_graph", { description: "Get dependency graph" }, async () => {
+      const graph = await taskGraph(ctx);
       return { content: [{ type: "text", text: JSON.stringify(graph) }] };
     });
 

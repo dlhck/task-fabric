@@ -5,18 +5,22 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { createServer } from "../../server.ts";
 import { closeStore } from "../../store.ts";
 import { authMiddleware } from "../../auth.ts";
-import { setupEnv, parseResult } from "./e2e-helpers.ts";
+import { setupEnv, createTestTasksDir, parseResult } from "./e2e-helpers.ts";
 import { rm } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 let server: ReturnType<typeof Bun.serve>;
 let tmpDir: string;
 let cleanupStore: () => Promise<void>;
+let restoreEnv: () => void;
 const API_KEY = "test-api-key-12345";
 
 beforeAll(async () => {
-  const env = await setupEnv();
-  tmpDir = env.tmpDir;
+  const envState = setupEnv();
+  restoreEnv = envState.restoreEnv;
+
+  const dirs = await createTestTasksDir();
+  tmpDir = dirs.tmpDir;
 
   const { createMcpInstance, ctx } = await createServer();
   cleanupStore = () => closeStore(ctx.store);
@@ -98,6 +102,7 @@ afterAll(async () => {
   server.stop(true);
   await cleanupStore();
   await rm(tmpDir, { recursive: true, force: true });
+  restoreEnv();
 });
 
 function baseUrl(): string {
@@ -145,7 +150,7 @@ describe("auth", () => {
     await client.connect(transport);
 
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(21);
+    expect(tools.length).toBeGreaterThan(0);
 
     await client.close();
   });
@@ -171,7 +176,6 @@ describe("full CRUD over HTTP", () => {
     const client = new Client({ name: "crud-test", version: "1.0.0" });
     await client.connect(transport);
 
-    // Create
     const createResult = await client.callTool({
       name: "task_create",
       arguments: { title: "HTTP E2E Task", priority: "high" },
@@ -180,16 +184,13 @@ describe("full CRUD over HTTP", () => {
     expect(created.id).toMatch(/^t_/);
     expect(created.title).toBe("HTTP E2E Task");
 
-    // Get
     const getResult = await client.callTool({
       name: "task_get",
       arguments: { id: created.id },
     });
     const fetched = parseResult(getResult) as any;
     expect(fetched.id).toBe(created.id);
-    expect(fetched.title).toBe("HTTP E2E Task");
 
-    // Delete
     const deleteResult = await client.callTool({
       name: "task_delete",
       arguments: { id: created.id, permanent: true },

@@ -8,12 +8,30 @@ import path from "node:path";
 import { TASK_STATUSES } from "../../types.ts";
 import simpleGit from "simple-git";
 
+const ENV_KEYS = ["TASKS_DIR", "API_KEY", "GIT_USER_NAME", "GIT_USER_EMAIL", "TASKS_REPO_URL", "GIT_TOKEN"] as const;
+
 export interface E2EContext {
   client: Client;
   cleanup: () => Promise<void>;
 }
 
-export async function setupEnv(): Promise<{ tasksDir: string; tmpDir: string }> {
+export function setupEnv(): { restoreEnv: () => void } {
+  const saved: Record<string, string | undefined> = {};
+  for (const key of ENV_KEYS) {
+    saved[key] = process.env[key];
+  }
+
+  return {
+    restoreEnv: () => {
+      for (const key of ENV_KEYS) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    },
+  };
+}
+
+export async function createTestTasksDir(): Promise<{ tasksDir: string; tmpDir: string }> {
   const tmpDir = await mkdtemp(path.join(tmpdir(), "tf-e2e-"));
   const tasksDir = path.join(tmpDir, "tasks");
   for (const status of TASK_STATUSES) {
@@ -36,7 +54,8 @@ export async function setupEnv(): Promise<{ tasksDir: string; tmpDir: string }> 
 }
 
 export async function createInMemoryMcpClient(): Promise<E2EContext & { tmpDir: string }> {
-  const { tmpDir } = await setupEnv();
+  const { restoreEnv } = setupEnv();
+  const { tmpDir } = await createTestTasksDir();
   const { createMcpInstance, ctx } = await createServer();
 
   const mcp = createMcpInstance();
@@ -54,6 +73,7 @@ export async function createInMemoryMcpClient(): Promise<E2EContext & { tmpDir: 
       await client.close();
       await closeStore(ctx.store);
       await rm(tmpDir, { recursive: true, force: true });
+      restoreEnv();
     },
   };
 }

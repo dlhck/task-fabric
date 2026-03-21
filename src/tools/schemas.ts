@@ -92,9 +92,6 @@ export const taskTimelineSchema = z.object({
   limit: z.number().int().min(1).max(100).optional(),
 });
 
-export const taskGraphSchema = z.object({
-  id: z.string().optional(),
-});
 
 export const syncHistorySchema = z.object({
   limit: z.number().int().min(1).max(100).optional(),

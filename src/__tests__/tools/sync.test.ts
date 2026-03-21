@@ -1,50 +1,17 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { syncStatus, syncHistory } from "../../tools/sync.ts";
-import { taskCreate } from "../../tools/crud.ts";
-import { initStore, closeStore, type Store } from "../../store.ts";
-import { initGit } from "../../git.ts";
-import { readSettings } from "../../settings.ts";
-import type { AppContext } from "../../context.ts";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { TASK_STATUSES } from "../../types.ts";
+import { syncStatus, syncHistory, syncDiff, syncPull, syncRestore } from "../../tools/sync.ts";
+import { taskCreate, taskUpdate, taskGet } from "../../tools/crud.ts";
+import { createTestEnv, cleanupTestEnv, type TestEnv } from "../test-helpers.ts";
 
-let tmpDir: string;
-let tasksDir: string;
-let store: Store;
-let ctx: AppContext;
+let env: TestEnv;
 
-beforeEach(async () => {
-  tmpDir = await mkdtemp(path.join(tmpdir(), "tf-sync-"));
-  tasksDir = path.join(tmpDir, "tasks");
-  for (const status of TASK_STATUSES) {
-    await mkdir(path.join(tasksDir, status), { recursive: true });
-  }
-
-  store = await initStore(tasksDir, path.join(tmpDir, "index.sqlite"));
-  const git = await initGit(tmpDir);
-  await Bun.write(path.join(tmpDir, ".gitkeep"), "");
-  await git.add(".");
-  await git.commit("init");
-
-  ctx = {
-    tasksDir,
-    store,
-    git,
-    getSettings: () => readSettings(tasksDir),
-  };
-});
-
-afterEach(async () => {
-  await closeStore(store);
-  await rm(tmpDir, { recursive: true, force: true });
-});
+beforeEach(async () => { env = await createTestEnv(); });
+afterEach(async () => { await cleanupTestEnv(env); });
 
 describe("syncStatus", () => {
   test("returns last commit info", async () => {
-    await taskCreate(ctx, { title: "Status check" });
-    const status = await syncStatus(ctx);
+    await taskCreate(env.ctx, { title: "Status check" });
+    const status = await syncStatus(env.ctx);
     expect(status.lastCommit).toContain("task(create)");
     expect(status.isClean).toBe(true);
   });
@@ -52,11 +19,71 @@ describe("syncStatus", () => {
 
 describe("syncHistory", () => {
   test("returns commit log entries", async () => {
-    await taskCreate(ctx, { title: "History task 1" });
-    await taskCreate(ctx, { title: "History task 2" });
+    await taskCreate(env.ctx, { title: "History task 1" });
+    await taskCreate(env.ctx, { title: "History task 2" });
 
-    const history = await syncHistory(ctx, {});
+    const history = await syncHistory(env.ctx, {});
     expect(history.length).toBeGreaterThanOrEqual(2);
     expect(history[0]).toContain("task(create)");
+  });
+});
+
+describe("syncDiff", () => {
+  test("returns diff between last two commits", async () => {
+    await taskCreate(env.ctx, { title: "Diff task" });
+    const diff = await syncDiff(env.ctx, {});
+    expect(diff).toContain("diff-task.md");
+  });
+
+  test("returns diff since a specific commit", async () => {
+    await taskCreate(env.ctx, { title: "First task" });
+    const history = await syncHistory(env.ctx, { limit: 1 });
+    const firstCommitHash = history[0]!.split(" ")[1]!;
+
+    await taskCreate(env.ctx, { title: "Second task" });
+    const diff = await syncDiff(env.ctx, { since: firstCommitHash });
+    expect(diff).toContain("second-task.md");
+  });
+});
+
+describe("syncPull", () => {
+  test("re-indexes when no remote configured", async () => {
+    await taskCreate(env.ctx, { title: "Pull test" });
+    const result = await syncPull(env.ctx);
+    expect(result.message).toContain("re-index complete");
+  });
+});
+
+describe("syncRestore", () => {
+  test("restores a task from git history", async () => {
+    const task = await taskCreate(env.ctx, { title: "Restore me", body: "Original body" });
+
+    // Get the commit where the task was created
+    const historyAfterCreate = await syncHistory(env.ctx, { limit: 1 });
+    const createCommit = historyAfterCreate[0]!.split(" ")[1]!;
+
+    // Update the task to change it
+    await taskUpdate(env.ctx, { id: task.id, body: "Modified body" });
+
+    // Verify the body changed
+    const modified = await taskGet(env.ctx, { id: task.id });
+    expect(modified!.body).toBe("Modified body");
+
+    // Restore from the create commit
+    const result = await syncRestore(env.ctx, { id: task.id, commit: createCommit });
+    expect(result.message).toContain("Restored");
+
+    // Verify the body is back to original
+    const restored = await taskGet(env.ctx, { id: task.id });
+    expect(restored!.body).toBe("Original body");
+  });
+
+  test("returns error when task not found in commit", async () => {
+    await taskCreate(env.ctx, { title: "Some task" });
+    const history = await syncHistory(env.ctx, { limit: 1 });
+    const commit = history[0]!.split(" ")[1]!;
+
+    const result = await syncRestore(env.ctx, { id: "t_notfound", commit });
+    expect(result.message).toContain("not found");
   });
 });

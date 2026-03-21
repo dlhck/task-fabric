@@ -82,7 +82,6 @@ interface GraphNode {
 
 export async function taskGraph(
   ctx: AppContext,
-  _params: { id?: string },
 ): Promise<{ nodes: GraphNode[] }> {
   const statuses: TaskStatus[] = [...ACTIVE_STATUSES];
   const allTasks: Task[] = [];
