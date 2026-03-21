@@ -5,7 +5,7 @@ export async function initGit(repoPath: string): Promise<SimpleGit> {
   const git = simpleGit(repoPath);
   const isRepo = await git.checkIsRepo();
   if (!isRepo) {
-    await git.init();
+    await git.init(["-b", "main"]);
   }
   return git;
 }

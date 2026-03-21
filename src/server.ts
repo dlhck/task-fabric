@@ -53,7 +53,7 @@ export async function createServer() {
       // Directory may already exist (e.g. Docker volume) — use init + fetch instead of clone
       await mkdir(tasksDir, { recursive: true });
       const g = simpleGit(tasksDir);
-      await g.init();
+      await g.init(["-b", "main"]);
       await g.addRemote("origin", cloneUrl);
       await g.fetch("origin");
       // Check if remote has a default branch and check it out
@@ -64,12 +64,28 @@ export async function createServer() {
         await g.checkout(["-B", branch, `origin/${branch}`]);
         await g.branch(["--set-upstream-to", `origin/${branch}`, branch]);
       } catch { /* empty remote, nothing to checkout */ }
-    } else if (env.GIT_TOKEN) {
+    } else {
       const g = simpleGit(tasksDir);
-      await g.remote(["set-url", "origin", cloneUrl]);
+      if (env.GIT_TOKEN) {
+        await g.remote(["set-url", "origin", cloneUrl]);
+      }
+      // Ensure local branch matches remote default (e.g. master → main)
+      try {
+        await g.fetch("origin");
+        const remote = await g.remote(["show", "origin"]);
+        const headMatch = String(remote).match(/HEAD branch:\s*(\S+)/);
+        const remoteBranch = headMatch?.[1];
+        if (remoteBranch) {
+          const local = (await g.branchLocal()).current;
+          if (local !== remoteBranch) {
+            await g.branch(["-m", local, remoteBranch]);
+            await g.branch(["--set-upstream-to", `origin/${remoteBranch}`, remoteBranch]);
+          }
+        }
+      } catch { /* offline ok */ }
     }
     git = simpleGit(tasksDir);
-    try { await git.pull({ "--rebase": null }); } catch { /* offline ok */ }
+    try { await git.pull("origin", (await git.branchLocal()).current, { "--rebase": null }); } catch { /* offline ok */ }
   } else {
     git = await initGit(tasksDir);
   }
