@@ -2,7 +2,9 @@ FROM oven/bun:1.3 AS base
 
 RUN apt-get update && \
     apt-get install -y git python3 make g++ && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    git config --global user.email "task-fabric@localhost" && \
+    git config --global user.name "TaskFabric"
 
 WORKDIR /app
 
