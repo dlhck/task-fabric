@@ -95,6 +95,14 @@ export async function createServer() {
     await mkdir(path.join(tasksDir, status), { recursive: true });
   }
 
+  // Ensure .gitignore excludes QMD index
+  const gitignorePath = path.join(tasksDir, ".gitignore");
+  const gitignoreFile = Bun.file(gitignorePath);
+  const gitignoreContent = (await gitignoreFile.exists()) ? await gitignoreFile.text() : "";
+  if (!gitignoreContent.includes(".qmd/")) {
+    await Bun.write(gitignorePath, gitignoreContent ? `${gitignoreContent.trimEnd()}\n.qmd/\n` : ".qmd/\n");
+  }
+
   // Init store
   serverStatus = "indexing";
   const dbPath = path.join(tasksDir, ".qmd", "index.sqlite");
