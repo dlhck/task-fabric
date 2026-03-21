@@ -39,11 +39,6 @@ export async function createServer() {
   const tasksDir = env.TASKS_DIR;
   const apiKey = env.API_KEY;
 
-  // Configure git identity
-  const gitBase = simpleGit();
-  await gitBase.addConfig("user.name", env.GIT_USER_NAME, false, "global");
-  await gitBase.addConfig("user.email", env.GIT_USER_EMAIL, false, "global");
-
   // Clone or init git
   let git: SimpleGit;
   if (env.TASKS_REPO_URL) {
@@ -89,6 +84,10 @@ export async function createServer() {
   } else {
     git = await initGit(tasksDir);
   }
+
+  // Configure git identity at repo level (not global)
+  await git.addConfig("user.name", env.GIT_USER_NAME);
+  await git.addConfig("user.email", env.GIT_USER_EMAIL);
 
   // Ensure status directories exist (after clone so they don't block it)
   for (const status of TASK_STATUSES) {
