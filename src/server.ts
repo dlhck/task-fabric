@@ -220,26 +220,48 @@ if (import.meta.main) {
   // Track transports by session ID for stateful connections
   const sessions = new Map<string, WebStandardStreamableHTTPServerTransport>();
 
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, mcp-session-id",
+    "Access-Control-Expose-Headers": "mcp-session-id",
+  };
+
   Bun.serve({
     port: env.PORT,
     async fetch(request) {
       const url = new URL(request.url);
 
+      // Handle CORS preflight
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
       if (url.pathname === "/health") {
         return new Response(JSON.stringify({ status: serverStatus, message: statusMessage }), {
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       }
 
       if (url.pathname === "/mcp") {
         const authError = authMiddleware(request, env.API_KEY);
-        if (authError) return authError;
+        if (authError) {
+          // Add CORS headers to 401 so the browser can read the error
+          for (const [k, v] of Object.entries(corsHeaders)) {
+            authError.headers.set(k, v);
+          }
+          return authError;
+        }
 
         // Check for existing session
         const sessionId = request.headers.get("mcp-session-id");
         if (sessionId && sessions.has(sessionId)) {
           const transport = sessions.get(sessionId)!;
-          return transport.handleRequest(request);
+          const response = await transport.handleRequest(request);
+          for (const [k, v] of Object.entries(corsHeaders)) {
+            response.headers.set(k, v);
+          }
+          return response;
         }
 
         // New session — create transport and connect
@@ -261,10 +283,14 @@ if (import.meta.main) {
         };
 
         await mcp.connect(transport);
-        return transport.handleRequest(request);
+        const response = await transport.handleRequest(request);
+        for (const [k, v] of Object.entries(corsHeaders)) {
+          response.headers.set(k, v);
+        }
+        return response;
       }
 
-      return new Response("Not Found", { status: 404 });
+      return new Response("Not Found", { status: 404, headers: corsHeaders });
     },
   });
 
