@@ -102,129 +102,131 @@ export async function createServer() {
     getSettings: () => readSettings(tasksDir),
   };
 
-  // Create MCP server
-  const mcp = new McpServer({ name: "task-fabric", version: "1.0.0" });
+  function createMcpInstance(): McpServer {
+    const mcp = new McpServer({ name: "task-fabric", version: "1.0.0" });
 
-  // Register all 20 tools
-  mcp.registerTool("task_create", { description: "Create a new task", inputSchema: taskCreateSchema }, async (params) => {
-    const task = await taskCreate(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(task) }] };
-  });
+    mcp.registerTool("task_create", { description: "Create a new task", inputSchema: taskCreateSchema }, async (params) => {
+      const task = await taskCreate(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(task) }] };
+    });
 
-  mcp.registerTool("task_get", { description: "Get a task by ID", inputSchema: taskGetSchema }, async (params) => {
-    const task = await taskGet(ctx, params);
-    if (!task) return { content: [{ type: "text", text: "Task not found" }], isError: true };
-    return { content: [{ type: "text", text: JSON.stringify(task) }] };
-  });
+    mcp.registerTool("task_get", { description: "Get a task by ID", inputSchema: taskGetSchema }, async (params) => {
+      const task = await taskGet(ctx, params);
+      if (!task) return { content: [{ type: "text", text: "Task not found" }], isError: true };
+      return { content: [{ type: "text", text: JSON.stringify(task) }] };
+    });
 
-  mcp.registerTool("task_update", { description: "Update a task", inputSchema: taskUpdateSchema }, async (params) => {
-    const task = await taskUpdate(ctx, params);
-    if (!task) return { content: [{ type: "text", text: "Task not found" }], isError: true };
-    return { content: [{ type: "text", text: JSON.stringify(task) }] };
-  });
+    mcp.registerTool("task_update", { description: "Update a task", inputSchema: taskUpdateSchema }, async (params) => {
+      const task = await taskUpdate(ctx, params);
+      if (!task) return { content: [{ type: "text", text: "Task not found" }], isError: true };
+      return { content: [{ type: "text", text: JSON.stringify(task) }] };
+    });
 
-  mcp.registerTool("task_delete", { description: "Delete/archive a task", inputSchema: taskDeleteSchema }, async (params) => {
-    const deleted = await taskDelete(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify({ deleted }) }] };
-  });
+    mcp.registerTool("task_delete", { description: "Delete/archive a task", inputSchema: taskDeleteSchema }, async (params) => {
+      const deleted = await taskDelete(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify({ deleted }) }] };
+    });
 
-  mcp.registerTool("task_list", { description: "List tasks with filters", inputSchema: taskListSchema }, async (params) => {
-    const tasks = await taskList(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(tasks) }] };
-  });
+    mcp.registerTool("task_list", { description: "List tasks with filters", inputSchema: taskListSchema }, async (params) => {
+      const tasks = await taskList(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(tasks) }] };
+    });
 
-  mcp.registerTool("task_search", { description: "Search tasks with keywords", inputSchema: taskSearchSchema }, async (params) => {
-    const results = await taskSearch(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(results) }] };
-  });
+    mcp.registerTool("task_search", { description: "Search tasks with keywords", inputSchema: taskSearchSchema }, async (params) => {
+      const results = await taskSearch(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(results) }] };
+    });
 
-  mcp.registerTool("task_query", { description: "Search tasks with filters", inputSchema: taskQuerySchema }, async (params) => {
-    const results = await taskQuery(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(results) }] };
-  });
+    mcp.registerTool("task_query", { description: "Search tasks with filters", inputSchema: taskQuerySchema }, async (params) => {
+      const results = await taskQuery(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(results) }] };
+    });
 
-  mcp.registerTool("task_move", { description: "Move task to a new status", inputSchema: taskMoveSchema }, async (params) => {
-    const task = await taskMove(ctx, params);
-    if (!task) return { content: [{ type: "text", text: "Task not found" }], isError: true };
-    return { content: [{ type: "text", text: JSON.stringify(task) }] };
-  });
+    mcp.registerTool("task_move", { description: "Move task to a new status", inputSchema: taskMoveSchema }, async (params) => {
+      const task = await taskMove(ctx, params);
+      if (!task) return { content: [{ type: "text", text: "Task not found" }], isError: true };
+      return { content: [{ type: "text", text: JSON.stringify(task) }] };
+    });
 
-  mcp.registerTool("task_log", { description: "Append a log entry to a task", inputSchema: taskLogSchema }, async (params) => {
-    const task = await taskLog(ctx, params);
-    if (!task) return { content: [{ type: "text", text: "Task not found" }], isError: true };
-    return { content: [{ type: "text", text: JSON.stringify(task) }] };
-  });
+    mcp.registerTool("task_log", { description: "Append a log entry to a task", inputSchema: taskLogSchema }, async (params) => {
+      const task = await taskLog(ctx, params);
+      if (!task) return { content: [{ type: "text", text: "Task not found" }], isError: true };
+      return { content: [{ type: "text", text: JSON.stringify(task) }] };
+    });
 
-  mcp.registerTool("task_link", { description: "Link two tasks", inputSchema: taskLinkSchema }, async (params) => {
-    const result = await taskLink(ctx, params);
-    if (!result) return { content: [{ type: "text", text: "One or both tasks not found" }], isError: true };
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  });
+    mcp.registerTool("task_link", { description: "Link two tasks", inputSchema: taskLinkSchema }, async (params) => {
+      const result = await taskLink(ctx, params);
+      if (!result) return { content: [{ type: "text", text: "One or both tasks not found" }], isError: true };
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    });
 
-  mcp.registerTool("task_batch", { description: "Execute batch operations", inputSchema: taskBatchSchema }, async (params) => {
-    const result = await taskBatch(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  });
+    mcp.registerTool("task_batch", { description: "Execute batch operations", inputSchema: taskBatchSchema }, async (params) => {
+      const result = await taskBatch(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    });
 
-  mcp.registerTool("task_dashboard", { description: "Get dashboard summary", inputSchema: taskDashboardSchema }, async (params) => {
-    const dashboard = await taskDashboard(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(dashboard) }] };
-  });
+    mcp.registerTool("task_dashboard", { description: "Get dashboard summary", inputSchema: taskDashboardSchema }, async (params) => {
+      const dashboard = await taskDashboard(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(dashboard) }] };
+    });
 
-  mcp.registerTool("task_timeline", { description: "Get tasks by due date", inputSchema: taskTimelineSchema }, async (params) => {
-    const timeline = await taskTimeline(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(timeline) }] };
-  });
+    mcp.registerTool("task_timeline", { description: "Get tasks by due date", inputSchema: taskTimelineSchema }, async (params) => {
+      const timeline = await taskTimeline(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(timeline) }] };
+    });
 
-  mcp.registerTool("task_graph", { description: "Get dependency graph", inputSchema: taskGraphSchema }, async (params) => {
-    const graph = await taskGraph(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(graph) }] };
-  });
+    mcp.registerTool("task_graph", { description: "Get dependency graph", inputSchema: taskGraphSchema }, async (params) => {
+      const graph = await taskGraph(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(graph) }] };
+    });
 
-  mcp.registerTool("sync_status", { description: "Get git sync status" }, async () => {
-    const status = await syncStatus(ctx);
-    return { content: [{ type: "text", text: JSON.stringify(status) }] };
-  });
+    mcp.registerTool("sync_status", { description: "Get git sync status" }, async () => {
+      const status = await syncStatus(ctx);
+      return { content: [{ type: "text", text: JSON.stringify(status) }] };
+    });
 
-  mcp.registerTool("sync_pull", { description: "Pull remote changes and re-index" }, async () => {
-    const result = await syncPull(ctx);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  });
+    mcp.registerTool("sync_pull", { description: "Pull remote changes and re-index" }, async () => {
+      const result = await syncPull(ctx);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    });
 
-  mcp.registerTool("sync_history", { description: "Get recent git history", inputSchema: syncHistorySchema }, async (params) => {
-    const history = await syncHistory(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(history) }] };
-  });
+    mcp.registerTool("sync_history", { description: "Get recent git history", inputSchema: syncHistorySchema }, async (params) => {
+      const history = await syncHistory(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(history) }] };
+    });
 
-  mcp.registerTool("sync_diff", { description: "Get diff since a commit", inputSchema: syncDiffSchema }, async (params) => {
-    const diff = await syncDiff(ctx, params);
-    return { content: [{ type: "text", text: diff }] };
-  });
+    mcp.registerTool("sync_diff", { description: "Get diff since a commit", inputSchema: syncDiffSchema }, async (params) => {
+      const diff = await syncDiff(ctx, params);
+      return { content: [{ type: "text", text: diff }] };
+    });
 
-  mcp.registerTool("sync_restore", { description: "Restore a file from git history", inputSchema: syncRestoreSchema }, async (params) => {
-    const result = await syncRestore(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  });
+    mcp.registerTool("sync_restore", { description: "Restore a file from git history", inputSchema: syncRestoreSchema }, async (params) => {
+      const result = await syncRestore(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    });
 
-  mcp.registerTool("settings_get", { description: "Get current settings" }, async () => {
-    const settings = await settingsGet(ctx);
-    return { content: [{ type: "text", text: JSON.stringify(settings) }] };
-  });
+    mcp.registerTool("settings_get", { description: "Get current settings" }, async () => {
+      const settings = await settingsGet(ctx);
+      return { content: [{ type: "text", text: JSON.stringify(settings) }] };
+    });
 
-  mcp.registerTool("settings_update", { description: "Update settings", inputSchema: settingsUpdateSchema }, async (params) => {
-    const settings = await settingsUpdate(ctx, params);
-    return { content: [{ type: "text", text: JSON.stringify(settings) }] };
-  });
+    mcp.registerTool("settings_update", { description: "Update settings", inputSchema: settingsUpdateSchema }, async (params) => {
+      const settings = await settingsUpdate(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(settings) }] };
+    });
 
-  return { mcp, ctx, env };
+    return mcp;
+  }
+
+  return { createMcpInstance, ctx, env };
 }
 
 // Only start the server if this file is run directly
 if (import.meta.main) {
-  const { mcp, env } = await createServer();
+  const { createMcpInstance, env } = await createServer();
 
-  // Track transports by session ID for stateful connections
-  const sessions = new Map<string, WebStandardStreamableHTTPServerTransport>();
+  // Track sessions: transport + its dedicated MCP instance
+  const sessions = new Map<string, { transport: WebStandardStreamableHTTPServerTransport; mcp: McpServer }>();
 
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
@@ -262,26 +264,26 @@ if (import.meta.main) {
         // Check for existing session
         const sessionId = request.headers.get("mcp-session-id");
         if (sessionId && sessions.has(sessionId)) {
-          const transport = sessions.get(sessionId)!;
-          const response = await transport.handleRequest(request);
+          const session = sessions.get(sessionId)!;
+          const response = await session.transport.handleRequest(request);
           for (const [k, v] of Object.entries(corsHeaders)) {
             response.headers.set(k, v);
           }
           return response;
         }
 
-        // New session — create transport and connect
+        // New session — create a dedicated MCP instance + transport
+        const mcp = createMcpInstance();
         const transport = new WebStandardStreamableHTTPServerTransport({
           sessionIdGenerator: () => crypto.randomUUID(),
           onsessioninitialized: (id) => {
-            sessions.set(id, transport);
+            sessions.set(id, { transport, mcp });
           },
         });
 
         transport.onclose = () => {
-          // Clean up session on close
-          for (const [id, t] of sessions) {
-            if (t === transport) {
+          for (const [id, s] of sessions) {
+            if (s.transport === transport) {
               sessions.delete(id);
               break;
             }

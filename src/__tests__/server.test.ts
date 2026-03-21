@@ -34,8 +34,10 @@ afterAll(async () => {
 });
 
 describe("createServer", () => {
-  test("creates MCP server with context", async () => {
-    const { mcp, ctx, env } = await createServer();
+  test("creates server with MCP factory and context", async () => {
+    const { createMcpInstance, ctx, env } = await createServer();
+    expect(createMcpInstance).toBeFunction();
+    const mcp = createMcpInstance();
     expect(mcp).toBeDefined();
     expect(ctx.tasksDir).toContain("tasks");
     expect(env.API_KEY).toBe("test-api-key-12345");
