@@ -1,0 +1,16 @@
+services:
+  task-fabric:
+    build: .
+    ports:
+      - "8181:8181"
+    environment:
+      - TASKS_DIR=/data/tasks
+      - API_KEY=${API_KEY}
+      - TASKS_REPO_URL=${TASKS_REPO_URL:-}
+      - PORT=8181
+    volumes:
+      - task-data:/data/tasks
+    restart: unless-stopped
+
+volumes:
+  task-data:
