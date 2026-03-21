@@ -24,6 +24,8 @@ beforeAll(async () => {
 
   process.env.TASKS_DIR = tasksDir;
   process.env.API_KEY = "test-api-key-12345";
+  process.env.GIT_USER_NAME = "Test User";
+  process.env.GIT_USER_EMAIL = "test@example.com";
   delete process.env.TASKS_REPO_URL;
 });
 

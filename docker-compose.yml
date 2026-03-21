@@ -8,6 +8,8 @@ services:
       - API_KEY=${API_KEY}
       - TASKS_REPO_URL=${TASKS_REPO_URL:-}
       - GIT_TOKEN=${GIT_TOKEN:-}
+      - GIT_USER_NAME=${GIT_USER_NAME}
+      - GIT_USER_EMAIL=${GIT_USER_EMAIL}
       - PORT=8181
     volumes:
       - task-data:/data/tasks
