@@ -31,8 +31,13 @@ export async function withGitSync<T>(
     const remotes = await git.getRemotes();
     if (remotes.length > 0) {
       const branch = (await git.branchLocal()).current;
-      await git.pull("origin", branch, { "--rebase": null });
-      await git.push("origin", branch);
+      // Pull first, but skip if remote branch doesn't exist yet (first push)
+      try {
+        await git.pull("origin", branch, { "--rebase": null });
+      } catch {
+        // Remote branch doesn't exist yet — that's fine, just push
+      }
+      await git.push("origin", branch, { "-u": null });
     }
   } catch (err) {
     throw new Error(`Git push failed after commit: ${err instanceof Error ? err.message : String(err)}`);
