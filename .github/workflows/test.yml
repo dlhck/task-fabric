@@ -1,0 +1,24 @@
+name: Tests
+
+on:
+  push:
+    branches: ["*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Run unit tests
+        run: bun test src/__tests__/task.test.ts src/__tests__/settings.test.ts src/__tests__/store.test.ts src/__tests__/git.test.ts src/__tests__/auth.test.ts src/__tests__/env.test.ts src/__tests__/server.test.ts src/__tests__/tools/
+
+      - name: Run e2e tests
+        run: bun test src/__tests__/e2e/
