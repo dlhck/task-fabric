@@ -30,8 +30,9 @@ export async function withGitSync<T>(
   try {
     const remotes = await git.getRemotes();
     if (remotes.length > 0) {
-      await git.pull({ "--rebase": null });
-      await git.push();
+      const branch = (await git.branchLocal()).current;
+      await git.pull("origin", branch, { "--rebase": null });
+      await git.push("origin", branch);
     }
   } catch (err) {
     throw new Error(`Git push failed after commit: ${err instanceof Error ? err.message : String(err)}`);

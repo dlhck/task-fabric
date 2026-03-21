@@ -62,6 +62,7 @@ export async function createServer() {
         const headMatch = String(remote).match(/HEAD branch:\s*(\S+)/);
         const branch = headMatch?.[1] ?? "main";
         await g.checkout(["-B", branch, `origin/${branch}`]);
+        await g.branch(["--set-upstream-to", `origin/${branch}`, branch]);
       } catch { /* empty remote, nothing to checkout */ }
     } else if (env.GIT_TOKEN) {
       const g = simpleGit(tasksDir);
