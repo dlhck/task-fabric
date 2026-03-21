@@ -1,6 +1,8 @@
 FROM oven/bun:1.3 AS base
 
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y git python3 make g++ && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
