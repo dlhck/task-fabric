@@ -39,13 +39,25 @@ export async function createServer() {
   const tasksDir = env.TASKS_DIR;
   const apiKey = env.API_KEY;
 
-  // Clone or init git (before creating dirs, since clone needs an empty target)
+  // Clone or init git
   let git: SimpleGit;
   if (env.TASKS_REPO_URL) {
     const cloneUrl = resolveRepoUrl(env.TASKS_REPO_URL, env.GIT_TOKEN);
-    const exists = await Bun.file(path.join(tasksDir, ".git/HEAD")).exists();
-    if (!exists) {
-      await simpleGit().clone(cloneUrl, tasksDir);
+    const hasGit = await Bun.file(path.join(tasksDir, ".git/HEAD")).exists();
+    if (!hasGit) {
+      // Directory may already exist (e.g. Docker volume) — use init + fetch instead of clone
+      await mkdir(tasksDir, { recursive: true });
+      const g = simpleGit(tasksDir);
+      await g.init();
+      await g.addRemote("origin", cloneUrl);
+      await g.fetch("origin");
+      // Check if remote has a default branch and check it out
+      try {
+        const remote = await g.remote(["show", "origin"]);
+        const headMatch = String(remote).match(/HEAD branch:\s*(\S+)/);
+        const branch = headMatch?.[1] ?? "main";
+        await g.checkout(["-B", branch, `origin/${branch}`]);
+      } catch { /* empty remote, nothing to checkout */ }
     } else if (env.GIT_TOKEN) {
       const g = simpleGit(tasksDir);
       await g.remote(["set-url", "origin", cloneUrl]);
