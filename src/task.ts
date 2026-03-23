@@ -17,6 +17,7 @@ const taskFrontmatterSchema = z.object({
   created: z.string().min(1),
   updated: z.string().min(1),
   completed_at: z.string().optional(),
+  start_date: z.string().optional(),
   due: z.string().optional(),
   assignee: z.string().optional(),
   waiting_on: z.string().optional(),
@@ -71,6 +72,7 @@ export function serializeTask(task: Task): string {
   };
 
   if (task.completed_at) frontmatter.completed_at = task.completed_at;
+  if (task.start_date !== undefined && task.start_date !== "") frontmatter.start_date = task.start_date;
   if (task.project !== undefined && task.project !== "") frontmatter.project = task.project;
   if (task.due !== undefined && task.due !== "") frontmatter.due = task.due;
   if (task.assignee !== undefined && task.assignee !== "") frontmatter.assignee = task.assignee;

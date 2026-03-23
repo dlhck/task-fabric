@@ -79,8 +79,8 @@ export async function taskDashboard(
 
 export async function taskTimeline(
   ctx: AppContext,
-  params: { dueAfter?: string; dueBefore?: string; limit?: number },
-): Promise<{ id: string; title: string; status: string; due: string; priority: string }[]> {
+  params: { startAfter?: string; startBefore?: string; dueAfter?: string; dueBefore?: string; limit?: number },
+): Promise<{ id: string; title: string; status: string; start_date?: string; due: string; priority: string }[]> {
   const statuses: TaskStatus[] = [...ACTIVE_STATUSES];
   const allTasks: Task[] = [];
 
@@ -89,23 +89,35 @@ export async function taskTimeline(
     allTasks.push(...tasks);
   }
 
-  let withDue = allTasks.filter((t) => t.due);
+  // Include tasks that have either a due date or a start_date
+  let dated = allTasks.filter((t) => t.due || t.start_date);
 
-  // Date range filtering — due dates are YYYY-MM-DD, params are also YYYY-MM-DD
+  // Date range filtering — dates are YYYY-MM-DD, string comparison works
   if (params.dueAfter) {
-    withDue = withDue.filter((t) => t.due!.slice(0, 10) >= params.dueAfter!);
+    dated = dated.filter((t) => t.due && t.due.slice(0, 10) >= params.dueAfter!);
   }
   if (params.dueBefore) {
-    withDue = withDue.filter((t) => t.due!.slice(0, 10) <= params.dueBefore!);
+    dated = dated.filter((t) => t.due && t.due.slice(0, 10) <= params.dueBefore!);
+  }
+  if (params.startAfter) {
+    dated = dated.filter((t) => t.start_date && t.start_date.slice(0, 10) >= params.startAfter!);
+  }
+  if (params.startBefore) {
+    dated = dated.filter((t) => t.start_date && t.start_date.slice(0, 10) <= params.startBefore!);
   }
 
-  // Sort by due date (string sort works for YYYY-MM-DD)
-  withDue.sort((a, b) => a.due!.localeCompare(b.due!));
+  // Sort by earliest date (start_date if present, otherwise due)
+  dated.sort((a, b) => {
+    const aDate = a.start_date?.slice(0, 10) ?? a.due?.slice(0, 10) ?? "9999";
+    const bDate = b.start_date?.slice(0, 10) ?? b.due?.slice(0, 10) ?? "9999";
+    return aDate.localeCompare(bDate);
+  });
 
-  return withDue.slice(0, params.limit ?? 50).map((t) => ({
+  return dated.slice(0, params.limit ?? 50).map((t) => ({
     id: t.id,
     title: t.title,
     status: t.status,
+    start_date: t.start_date,
     due: t.due!,
     priority: t.priority,
   }));

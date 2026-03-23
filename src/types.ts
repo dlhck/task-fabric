@@ -16,6 +16,7 @@ export interface Task {
   created: string;
   updated: string;
   completed_at?: string;
+  start_date?: string;
   due?: string;
   assignee?: string;
   waiting_on?: string;

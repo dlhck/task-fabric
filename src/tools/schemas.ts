@@ -8,6 +8,7 @@ export const taskCreateSchema = z.object({
   priority: z.enum(["low", "medium", "high", "critical"]).optional(),
   tags: z.array(z.string()).optional(),
   project: z.string().optional(),
+  start_date: isoDate.optional(),
   due: isoDate.optional(),
   assignee: z.string().optional(),
   body: z.string().optional(),
@@ -25,6 +26,7 @@ export const taskUpdateSchema = z.object({
   add_tags: z.array(z.string()).optional(),
   remove_tags: z.array(z.string()).optional(),
   project: z.string().optional(),
+  start_date: isoDate.optional(),
   due: isoDate.optional(),
   assignee: z.string().optional(),
   waiting_on: z.string().optional(),
@@ -123,6 +125,8 @@ export const taskDashboardSchema = z.object({
 });
 
 export const taskTimelineSchema = z.object({
+  startAfter: isoDate.optional(),
+  startBefore: isoDate.optional(),
   dueAfter: isoDate.optional(),
   dueBefore: isoDate.optional(),
   limit: z.number().int().min(1).max(100).optional(),

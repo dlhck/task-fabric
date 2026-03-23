@@ -190,6 +190,7 @@ async function writeCreate(ctx: AppContext, params: Record<string, unknown>): Pr
     project: params.project as string | undefined,
     created: now,
     updated: now,
+    start_date: params.start_date as string | undefined,
     due: params.due as string | undefined,
     assignee: (params.assignee as string) || settings.default_assignee || undefined,
     body: (params.body as string) ?? "",

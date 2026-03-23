@@ -10,7 +10,7 @@ import matter from "gray-matter";
 
 export async function taskCreate(
   ctx: AppContext,
-  params: { title: string; priority?: string; tags?: string[]; project?: string; due?: string; assignee?: string; body?: string },
+  params: { title: string; priority?: string; tags?: string[]; project?: string; start_date?: string; due?: string; assignee?: string; body?: string },
 ): Promise<Task> {
   const settings = await ctx.getSettings();
   const id = generateId();
@@ -26,6 +26,7 @@ export async function taskCreate(
     project: params.project,
     created: now,
     updated: now,
+    start_date: params.start_date,
     due: params.due,
     assignee: params.assignee || settings.default_assignee || undefined,
     body: params.body ?? "",
@@ -54,7 +55,7 @@ export async function taskUpdate(
   params: {
     id: string; title?: string; priority?: string; tags?: string[];
     add_tags?: string[]; remove_tags?: string[];
-    project?: string; due?: string; assignee?: string; waiting_on?: string;
+    project?: string; start_date?: string; due?: string; assignee?: string; waiting_on?: string;
     body?: string; depends_on?: string[]; blocks?: string[];
   },
 ): Promise<Task | null> {
@@ -70,6 +71,7 @@ export async function taskUpdate(
   if (params.add_tags?.length) task.tags = [...new Set([...task.tags, ...params.add_tags])];
   if (params.remove_tags?.length) task.tags = task.tags.filter((t) => !params.remove_tags!.includes(t));
   if (params.project !== undefined) task.project = params.project;
+  if (params.start_date !== undefined) task.start_date = params.start_date;
   if (params.due !== undefined) task.due = params.due;
   if (params.assignee !== undefined) task.assignee = params.assignee;
   if (params.waiting_on !== undefined) task.waiting_on = params.waiting_on;
