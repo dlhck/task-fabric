@@ -1,16 +1,13 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
-import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
-import { createServer } from "../../server.ts";
+import { createServer, createApp } from "../../server.ts";
 import { closeStore } from "../../store.ts";
 import { TaskFabricOAuthProvider } from "../../oauth-provider.ts";
 import { setupEnv, createTestTasksDir, parseResult } from "./e2e-helpers.ts";
-import { rm } from "node:fs/promises";
-import express from "express";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { rm, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { Server } from "node:http";
 
 let httpServer: Server;
@@ -20,6 +17,7 @@ let cleanupStore: () => Promise<void>;
 let restoreEnv: () => void;
 let oauthProvider: TaskFabricOAuthProvider;
 const API_KEY = "test-api-key-12345";
+const TOOL_COUNT = 27;
 
 beforeAll(async () => {
   const envState = setupEnv();
@@ -31,118 +29,30 @@ beforeAll(async () => {
   const { createMcpInstance, ctx } = await createServer();
   cleanupStore = () => closeStore(ctx.store);
 
-  const sessions = new Map<string, { transport: StreamableHTTPServerTransport; mcp: McpServer }>();
+  const oauthDbPath = path.join(tmpDir, "oauth-test.sqlite");
+  oauthProvider = new TaskFabricOAuthProvider(API_KEY, oauthDbPath);
 
-  oauthProvider = new TaskFabricOAuthProvider(API_KEY);
-
-  const app = express();
-
-  // CORS
-  app.use((_req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id");
-    res.header("Access-Control-Expose-Headers", "mcp-session-id");
-    if (_req.method === "OPTIONS") {
-      res.sendStatus(204);
-      return;
-    }
-    next();
-  });
-
-  // OAuth router
-  const issuerUrl = new URL("http://localhost:0");
-  app.use(mcpAuthRouter({
-    provider: oauthProvider,
-    issuerUrl,
-    resourceServerUrl: new URL("/mcp", issuerUrl),
-    resourceName: "Task Fabric Test",
-  }));
-
-  // Consent form handler
-  app.post("/authorize/decide", express.urlencoded({ extended: false }), (req, res) => {
-    const { api_key, client_id, redirect_uri, state, code_challenge, scope, resource, action } = req.body;
-    const redirectUrl = new URL(redirect_uri);
-
-    if (action === "deny") {
-      redirectUrl.searchParams.set("error", "access_denied");
-      if (state) redirectUrl.searchParams.set("state", state);
-      res.redirect(302, redirectUrl.toString());
-      return;
-    }
-
-    const code = oauthProvider.generateAuthorizationCode(
-      api_key ?? "",
-      client_id,
-      redirect_uri,
-      code_challenge,
-      scope ? scope.split(" ").filter(Boolean) : [],
-      resource || undefined,
-    );
-
-    if (!code) {
-      redirectUrl.searchParams.set("error", "access_denied");
-      if (state) redirectUrl.searchParams.set("state", state);
-      res.redirect(302, redirectUrl.toString());
-      return;
-    }
-
-    redirectUrl.searchParams.set("code", code);
-    if (state) redirectUrl.searchParams.set("state", state);
-    res.redirect(302, redirectUrl.toString());
-  });
-
-  // Health
-  app.get("/health", (_req, res) => {
-    res.json({ status: "ready" });
-  });
-
-  // MCP endpoint with bearer auth
-  const bearerAuth = requireBearerAuth({ verifier: oauthProvider });
-
-  const mcpHandler = async (req: express.Request, res: express.Response) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-    if (sessionId && sessions.has(sessionId)) {
-      const session = sessions.get(sessionId)!;
-      await session.transport.handleRequest(req, res);
-      return;
-    }
-
-    if (req.method === "POST") {
-      const mcp = createMcpInstance();
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => crypto.randomUUID(),
-        onsessioninitialized: (id) => {
-          sessions.set(id, { transport, mcp });
-        },
-      });
-
-      transport.onclose = () => {
-        const sid = transport.sessionId;
-        if (sid && sessions.has(sid)) {
-          sessions.delete(sid);
-        }
-      };
-
-      await mcp.connect(transport);
-      await transport.handleRequest(req, res);
-      return;
-    }
-
-    res.status(400).json({ error: "No valid session" });
-  };
-
-  app.post("/mcp", bearerAuth, mcpHandler);
-  app.get("/mcp", bearerAuth, mcpHandler);
-  app.delete("/mcp", bearerAuth, mcpHandler);
-
-  // Start server on random port
+  // Start on port 0 first to get the actual port, then configure issuer
   await new Promise<void>((resolve) => {
+    // Temporary server to grab a port
+    const { app } = createApp({
+      createMcpInstance,
+      oauthProvider,
+      issuerUrl: new URL("http://localhost:0"),
+    });
     httpServer = app.listen(0, () => {
       const addr = httpServer.address();
       serverPort = typeof addr === "object" && addr ? addr.port : 0;
-      resolve();
+      // Close and recreate with correct issuer URL
+      httpServer.close(() => {
+        const issuerUrl = new URL(`http://localhost:${serverPort}`);
+        const { app: realApp } = createApp({
+          createMcpInstance,
+          oauthProvider,
+          issuerUrl,
+        });
+        httpServer = realApp.listen(serverPort, () => resolve());
+      });
     });
   });
 });
@@ -157,6 +67,55 @@ afterAll(async () => {
 
 function baseUrl(): string {
   return `http://localhost:${serverPort}`;
+}
+
+// Helper: register an OAuth client and do the full auth code flow
+async function getOAuthAccessToken(): Promise<{ accessToken: string; refreshToken: string; clientId: string }> {
+  // Register client
+  const regResponse = await fetch(`${baseUrl()}/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      redirect_uris: ["http://localhost:9999/callback"],
+      client_name: "Flow Helper",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    }),
+  });
+  const client = await regResponse.json();
+
+  // Generate PKCE
+  const codeVerifier = crypto.randomUUID() + crypto.randomUUID();
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier));
+  const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+  // Submit consent
+  const consentResponse = await fetch(`${baseUrl()}/authorize/decide`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      api_key: API_KEY, client_id: client.client_id,
+      redirect_uri: "http://localhost:9999/callback", state: "s",
+      code_challenge: codeChallenge, scope: "", resource: "", action: "approve",
+    }).toString(),
+    redirect: "manual",
+  });
+  const authCode = new URL(consentResponse.headers.get("location")!).searchParams.get("code")!;
+
+  // Exchange code
+  const tokenResponse = await fetch(`${baseUrl()}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code", code: authCode,
+      client_id: client.client_id, code_verifier: codeVerifier,
+      redirect_uri: "http://localhost:9999/callback",
+    }).toString(),
+  });
+  const tokens = await tokenResponse.json();
+  return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token, clientId: client.client_id };
 }
 
 describe("health endpoint", () => {
@@ -200,7 +159,7 @@ describe("auth - backward compat with API_KEY", () => {
     await client.connect(transport);
 
     const { tools } = await client.listTools();
-    expect(tools.length).toBeGreaterThan(0);
+    expect(tools.length).toBe(TOOL_COUNT);
 
     await client.close();
   });
@@ -217,25 +176,25 @@ describe("CORS", () => {
 });
 
 describe("OAuth discovery", () => {
-  test("serves protected resource metadata", async () => {
+  test("serves protected resource metadata with correct values", async () => {
     const response = await fetch(`${baseUrl()}/.well-known/oauth-protected-resource/mcp`);
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.resource).toBeDefined();
-    expect(body.authorization_servers).toBeInstanceOf(Array);
-    expect(body.authorization_servers.length).toBeGreaterThan(0);
+    expect(body.resource).toBe(`${baseUrl()}/mcp`);
+    expect(body.authorization_servers).toEqual([`${baseUrl()}/`]);
+    expect(body.resource_name).toBe("Task Fabric");
   });
 
-  test("serves authorization server metadata", async () => {
+  test("serves authorization server metadata with correct endpoints", async () => {
     const response = await fetch(`${baseUrl()}/.well-known/oauth-authorization-server`);
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.issuer).toBeDefined();
-    expect(body.authorization_endpoint).toBeDefined();
-    expect(body.token_endpoint).toBeDefined();
-    expect(body.registration_endpoint).toBeDefined();
-    expect(body.response_types_supported).toContain("code");
-    expect(body.code_challenge_methods_supported).toContain("S256");
+    expect(body.issuer).toBe(`${baseUrl()}/`);
+    expect(body.authorization_endpoint).toBe(`${baseUrl()}/authorize`);
+    expect(body.token_endpoint).toBe(`${baseUrl()}/token`);
+    expect(body.registration_endpoint).toBe(`${baseUrl()}/register`);
+    expect(body.response_types_supported).toEqual(["code"]);
+    expect(body.code_challenge_methods_supported).toEqual(["S256"]);
   });
 });
 
@@ -256,104 +215,114 @@ describe("OAuth flow", () => {
     const body = await response.json();
     expect(body.client_id).toBeDefined();
     expect(body.client_name).toBe("Test Client");
+    expect(body.client_id_issued_at).toBeGreaterThan(0);
   });
 
-  test("full authorization code flow", async () => {
-    // 1. Register client
-    const regResponse = await fetch(`${baseUrl()}/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        redirect_uris: ["http://localhost:9999/callback"],
-        client_name: "Flow Test",
-        grant_types: ["authorization_code", "refresh_token"],
-        response_types: ["code"],
-        token_endpoint_auth_method: "none",
-      }),
-    });
-    const client = await regResponse.json();
+  test("full authorization code flow with MCP handshake", async () => {
+    const { accessToken } = await getOAuthAccessToken();
 
-    // 2. Generate PKCE pair
-    const codeVerifier = crypto.randomUUID() + crypto.randomUUID();
-    const encoder = new TextEncoder();
-    const digest = await crypto.subtle.digest("SHA-256", encoder.encode(codeVerifier));
-    const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
-      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-
-    // 3. Submit consent form directly (simulates user approving)
-    const formData = new URLSearchParams({
-      api_key: API_KEY,
-      client_id: client.client_id,
-      redirect_uri: "http://localhost:9999/callback",
-      state: "test-state-123",
-      code_challenge: codeChallenge,
-      scope: "",
-      resource: "",
-      action: "approve",
-    });
-
-    const consentResponse = await fetch(`${baseUrl()}/authorize/decide`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formData.toString(),
-      redirect: "manual",
-    });
-    expect(consentResponse.status).toBe(302);
-    const location = consentResponse.headers.get("location")!;
-    const callbackUrl = new URL(location);
-    expect(callbackUrl.searchParams.get("state")).toBe("test-state-123");
-    const authCode = callbackUrl.searchParams.get("code");
-    expect(authCode).toBeDefined();
-
-    // 4. Exchange code for token
-    const tokenResponse = await fetch(`${baseUrl()}/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
-        code: authCode!,
-        client_id: client.client_id,
-        code_verifier: codeVerifier,
-        redirect_uri: "http://localhost:9999/callback",
-      }).toString(),
-    });
-    expect(tokenResponse.status).toBe(200);
-    const tokens = await tokenResponse.json();
-    expect(tokens.access_token).toBeDefined();
-    expect(tokens.token_type).toBe("bearer");
-    expect(tokens.refresh_token).toBeDefined();
-
-    // 5. Use access token to connect to MCP
     const transport = new StreamableHTTPClientTransport(
       new URL(`${baseUrl()}/mcp`),
-      { requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}` } } },
+      { requestInit: { headers: { Authorization: `Bearer ${accessToken}` } } },
     );
 
     const mcpClient = new Client({ name: "oauth-test", version: "1.0.0" });
     await mcpClient.connect(transport);
 
     const { tools } = await mcpClient.listTools();
-    expect(tools.length).toBeGreaterThan(0);
+    expect(tools.length).toBe(TOOL_COUNT);
 
     await mcpClient.close();
   });
 
-  test("consent deny redirects with error", async () => {
-    const formData = new URLSearchParams({
-      api_key: "",
-      client_id: "some-client",
-      redirect_uri: "http://localhost:9999/callback",
-      state: "deny-test",
-      code_challenge: "test",
-      scope: "",
-      resource: "",
-      action: "deny",
+  test("refresh token rotation issues new tokens", async () => {
+    const { refreshToken, clientId } = await getOAuthAccessToken();
+
+    const response = await fetch(`${baseUrl()}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: clientId,
+      }).toString(),
     });
+    expect(response.status).toBe(200);
+    const newTokens = await response.json();
+    expect(newTokens.access_token).toBeDefined();
+    expect(newTokens.refresh_token).toBeDefined();
+    expect(newTokens.access_token).not.toBe(refreshToken);
+
+    // Old refresh token should be rejected
+    const reuse = await fetch(`${baseUrl()}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: clientId,
+      }).toString(),
+    });
+    expect(reuse.status).not.toBe(200);
+  });
+
+  test("token revocation invalidates access token", async () => {
+    const { accessToken, clientId } = await getOAuthAccessToken();
+
+    // Verify it works first
+    const beforeResponse = await fetch(`${baseUrl()}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "initialize", id: 1 }),
+    });
+    expect(beforeResponse.status).not.toBe(401);
+
+    // Revoke
+    const revokeResponse = await fetch(`${baseUrl()}/revoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        token: accessToken,
+        client_id: clientId,
+      }).toString(),
+    });
+    expect(revokeResponse.status).toBe(200);
+
+    // Should now be rejected
+    const afterResponse = await fetch(`${baseUrl()}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "initialize", id: 1 }),
+    });
+    expect(afterResponse.status).toBe(401);
+  });
+
+  test("consent deny redirects with error", async () => {
+    const reg = await fetch(`${baseUrl()}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: ["http://localhost:9999/callback"],
+        client_name: "Deny Test",
+        token_endpoint_auth_method: "none",
+      }),
+    });
+    const client = await reg.json();
 
     const response = await fetch(`${baseUrl()}/authorize/decide`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formData.toString(),
+      body: new URLSearchParams({
+        api_key: "", client_id: client.client_id,
+        redirect_uri: "http://localhost:9999/callback", state: "deny-test",
+        code_challenge: "test", scope: "", resource: "", action: "deny",
+      }).toString(),
       redirect: "manual",
     });
     expect(response.status).toBe(302);
@@ -362,27 +331,72 @@ describe("OAuth flow", () => {
     expect(location.searchParams.get("state")).toBe("deny-test");
   });
 
-  test("wrong API key is rejected", async () => {
-    const formData = new URLSearchParams({
-      api_key: "wrong-key",
-      client_id: "some-client",
-      redirect_uri: "http://localhost:9999/callback",
-      state: "bad-key",
-      code_challenge: "test",
-      scope: "",
-      resource: "",
-      action: "approve",
+  test("wrong API key is rejected with error redirect", async () => {
+    const reg = await fetch(`${baseUrl()}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: ["http://localhost:9999/callback"],
+        client_name: "Bad Key Test",
+        token_endpoint_auth_method: "none",
+      }),
     });
+    const client = await reg.json();
 
     const response = await fetch(`${baseUrl()}/authorize/decide`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formData.toString(),
+      body: new URLSearchParams({
+        api_key: "wrong-key", client_id: client.client_id,
+        redirect_uri: "http://localhost:9999/callback", state: "bad-key",
+        code_challenge: "test", scope: "", resource: "", action: "approve",
+      }).toString(),
       redirect: "manual",
     });
     expect(response.status).toBe(302);
     const location = new URL(response.headers.get("location")!);
     expect(location.searchParams.get("error")).toBe("access_denied");
+  });
+
+  test("unregistered redirect_uri is rejected with 400", async () => {
+    const reg = await fetch(`${baseUrl()}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: ["http://localhost:9999/callback"],
+        client_name: "Redirect Test",
+        token_endpoint_auth_method: "none",
+      }),
+    });
+    const client = await reg.json();
+
+    const response = await fetch(`${baseUrl()}/authorize/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        api_key: API_KEY, client_id: client.client_id,
+        redirect_uri: "http://evil.com/steal", state: "x",
+        code_challenge: "test", scope: "", resource: "", action: "approve",
+      }).toString(),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBe("invalid_request");
+  });
+
+  test("unknown client_id is rejected with 400", async () => {
+    const response = await fetch(`${baseUrl()}/authorize/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        api_key: API_KEY, client_id: "nonexistent-client",
+        redirect_uri: "http://evil.com/steal", state: "x",
+        code_challenge: "test", scope: "", resource: "", action: "approve",
+      }).toString(),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(400);
   });
 });
 

@@ -7,7 +7,6 @@ import { initStore, reindex, embedAll, closeStore, type Store } from "./store.ts
 import { initGit } from "./git.ts";
 import { readSettings } from "./settings.ts";
 import { TaskFabricOAuthProvider } from "./oauth-provider.ts";
-import { constantTimeEqual } from "./util.ts";
 import type { AppContext } from "./context.ts";
 import type { SimpleGit } from "simple-git";
 import { TASK_STATUSES } from "./types.ts";
@@ -100,12 +99,21 @@ export async function createServer() {
     await mkdir(path.join(tasksDir, status), { recursive: true });
   }
 
-  // Ensure .gitignore excludes QMD index
+  // Ensure .gitignore excludes QMD index and OAuth DB
   const gitignorePath = path.join(tasksDir, ".gitignore");
   const gitignoreFile = Bun.file(gitignorePath);
-  const gitignoreContent = (await gitignoreFile.exists()) ? await gitignoreFile.text() : "";
+  let gitignoreContent = (await gitignoreFile.exists()) ? await gitignoreFile.text() : "";
+  let gitignoreChanged = false;
   if (!gitignoreContent.includes(".qmd/")) {
-    await Bun.write(gitignorePath, gitignoreContent ? `${gitignoreContent.trimEnd()}\n.qmd/\n` : ".qmd/\n");
+    gitignoreContent = gitignoreContent ? `${gitignoreContent.trimEnd()}\n.qmd/\n` : ".qmd/\n";
+    gitignoreChanged = true;
+  }
+  if (!gitignoreContent.includes(".oauth.sqlite")) {
+    gitignoreContent = `${gitignoreContent.trimEnd()}\n.oauth.sqlite\n`;
+    gitignoreChanged = true;
+  }
+  if (gitignoreChanged) {
+    await Bun.write(gitignorePath, gitignoreContent);
   }
 
   // Init store
@@ -307,16 +315,19 @@ export async function createServer() {
   return { createMcpInstance, ctx, env };
 }
 
-// Only start the server if this file is run directly
-if (import.meta.main) {
-  const { createMcpInstance, ctx, env } = await createServer();
-  const { store } = ctx;
+export interface CreateAppOptions {
+  createMcpInstance: () => McpServer;
+  oauthProvider: TaskFabricOAuthProvider;
+  issuerUrl: URL;
+  getServerStatus?: () => { status: string; message: string };
+}
 
-  const issuerUrl = new URL(env.SERVER_URL || `http://localhost:${env.PORT}`);
+/**
+ * Creates the Express app with OAuth, MCP, and health endpoints.
+ * Shared between production server and tests.
+ */
+export function createApp({ createMcpInstance, oauthProvider, issuerUrl, getServerStatus }: CreateAppOptions) {
   const mcpServerUrl = new URL("/mcp", issuerUrl);
-  const oauthProvider = new TaskFabricOAuthProvider(env.API_KEY);
-
-  // Track sessions: transport + its dedicated MCP instance
   const sessions = new Map<string, { transport: StreamableHTTPServerTransport; mcp: McpServer }>();
 
   const app = express();
@@ -343,8 +354,15 @@ if (import.meta.main) {
   }));
 
   // Custom consent form handler
-  app.post("/authorize/decide", express.urlencoded({ extended: false }), (req: Request, res: Response) => {
+  app.post("/authorize/decide", express.urlencoded({ extended: false }), async (req: Request, res: Response) => {
     const { api_key, client_id, redirect_uri, state, code_challenge, scope, resource, action } = req.body;
+
+    // Validate redirect_uri against the registered client before any redirect
+    const client = await oauthProvider.validateClientRedirect(client_id, redirect_uri);
+    if (!client) {
+      res.status(400).json({ error: "invalid_request", error_description: "Unknown client or unregistered redirect_uri" });
+      return;
+    }
 
     const redirectUrl = new URL(redirect_uri);
 
@@ -379,7 +397,8 @@ if (import.meta.main) {
 
   // Health endpoint
   app.get("/health", (_req: Request, res: Response) => {
-    res.json({ status: serverStatus, message: statusMessage });
+    const status = getServerStatus?.() ?? { status: "ready", message: "" };
+    res.json(status);
   });
 
   // Bearer auth middleware for MCP endpoint
@@ -424,6 +443,25 @@ if (import.meta.main) {
   app.post("/mcp", bearerAuth, mcpHandler);
   app.get("/mcp", bearerAuth, mcpHandler);
   app.delete("/mcp", bearerAuth, mcpHandler);
+
+  return { app, sessions };
+}
+
+// Only start the server if this file is run directly
+if (import.meta.main) {
+  const { createMcpInstance, ctx, env } = await createServer();
+  const { store } = ctx;
+
+  const issuerUrl = new URL(env.SERVER_URL || `http://localhost:${env.PORT}`);
+  const oauthDbPath = path.join(env.TASKS_DIR, ".oauth.sqlite");
+  const oauthProvider = new TaskFabricOAuthProvider(env.API_KEY, oauthDbPath);
+
+  const { app, sessions } = createApp({
+    createMcpInstance,
+    oauthProvider,
+    issuerUrl,
+    getServerStatus: () => ({ status: serverStatus, message: statusMessage }),
+  });
 
   const httpServer = app.listen(env.PORT, () => {
     console.log(`TaskFabric MCP server running on port ${env.PORT}`);

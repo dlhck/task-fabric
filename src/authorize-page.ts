@@ -8,7 +8,7 @@ export interface AuthorizePageParams {
   resource: string;
 }
 
-function esc(str: string): string {
+function escapeHtml(str: string): string {
   return str
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -45,14 +45,14 @@ export function renderAuthorizePage(params: AuthorizePageParams): string {
 <body>
   <div class="card">
     <h1>Authorize Access</h1>
-    <p class="client"><strong>${esc(params.clientName)}</strong> wants to connect to Task Fabric.</p>
+    <p class="client"><strong>${escapeHtml(params.clientName)}</strong> wants to connect to Task Fabric.</p>
     <form method="POST" action="/authorize/decide">
-      <input type="hidden" name="client_id" value="${esc(params.clientId)}">
-      <input type="hidden" name="redirect_uri" value="${esc(params.redirectUri)}">
-      <input type="hidden" name="state" value="${esc(params.state ?? "")}">
-      <input type="hidden" name="code_challenge" value="${esc(params.codeChallenge)}">
-      <input type="hidden" name="scope" value="${esc(params.scope)}">
-      <input type="hidden" name="resource" value="${esc(params.resource)}">
+      <input type="hidden" name="client_id" value="${escapeHtml(params.clientId)}">
+      <input type="hidden" name="redirect_uri" value="${escapeHtml(params.redirectUri)}">
+      <input type="hidden" name="state" value="${escapeHtml(params.state ?? "")}">
+      <input type="hidden" name="code_challenge" value="${escapeHtml(params.codeChallenge)}">
+      <input type="hidden" name="scope" value="${escapeHtml(params.scope)}">
+      <input type="hidden" name="resource" value="${escapeHtml(params.resource)}">
       <label for="api_key">API Key</label>
       <input type="password" id="api_key" name="api_key" placeholder="Enter your API key" required autofocus>
       <div class="actions">
