@@ -15,8 +15,10 @@ export interface Task {
   project?: string;
   created: string;
   updated: string;
+  completed_at?: string;
   due?: string;
   assignee?: string;
+  waiting_on?: string;
   depends_on?: string[];
   blocks?: string[];
   body: string;

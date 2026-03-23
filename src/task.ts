@@ -4,6 +4,9 @@ import matter from "gray-matter";
 import type { Task, TaskStatus } from "./types.ts";
 import { DATED_STATUSES, TASK_STATUSES, PRIORITIES } from "./types.ts";
 
+// ISO 8601 date: YYYY-MM-DD or full ISO datetime
+const isoDatePattern = /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/;
+
 const taskFrontmatterSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
@@ -13,10 +16,12 @@ const taskFrontmatterSchema = z.object({
   project: z.string().optional(),
   created: z.string().min(1),
   updated: z.string().min(1),
+  completed_at: z.string().optional(),
   due: z.string().optional(),
   assignee: z.string().optional(),
-  depends_on: z.array(z.string()).optional(),
-  blocks: z.array(z.string()).optional(),
+  waiting_on: z.string().optional(),
+  depends_on: z.array(z.string()).optional().default([]),
+  blocks: z.array(z.string()).optional().default([]),
 });
 
 export function generateId(): string {
@@ -33,6 +38,16 @@ export function slugify(title: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 80)
     || "untitled";
+}
+
+// Include task ID in filename to prevent collisions on identical titles
+export function taskFilename(title: string, id: string): string {
+  const slug = slugify(title);
+  return `${slug}-${id}`;
+}
+
+export function isValidIsoDate(value: string): boolean {
+  return isoDatePattern.test(value) && !isNaN(new Date(value).getTime());
 }
 
 export function parseTask(content: string): Task {
@@ -55,9 +70,11 @@ export function serializeTask(task: Task): string {
     updated: task.updated,
   };
 
+  if (task.completed_at) frontmatter.completed_at = task.completed_at;
   if (task.project !== undefined && task.project !== "") frontmatter.project = task.project;
   if (task.due !== undefined && task.due !== "") frontmatter.due = task.due;
   if (task.assignee !== undefined && task.assignee !== "") frontmatter.assignee = task.assignee;
+  if (task.waiting_on !== undefined && task.waiting_on !== "") frontmatter.waiting_on = task.waiting_on;
   if (task.depends_on?.length) frontmatter.depends_on = task.depends_on;
   if (task.blocks?.length) frontmatter.blocks = task.blocks;
 
