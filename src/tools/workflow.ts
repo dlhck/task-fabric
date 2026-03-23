@@ -1,5 +1,5 @@
-import { parseTask, serializeTask, slugify, resolveTaskPath, generateId } from "../task.ts";
-import { findTaskFile } from "../task-finder.ts";
+import { parseTask, serializeTask, slugify, taskFilename, resolveTaskPath, generateId } from "../task.ts";
+import { findTaskFile, findFilesRecursive } from "../task-finder.ts";
 import { withGitSync, formatCommitMessage } from "../git.ts";
 import { formatTimestamp } from "../util.ts";
 import type { AppContext } from "../context.ts";
@@ -7,10 +7,11 @@ import type { Task, TaskStatus, Priority } from "../types.ts";
 import { TASK_STATUSES } from "../types.ts";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
+import matter from "gray-matter";
 
 export async function taskMove(
   ctx: AppContext,
-  params: { id: string; status: TaskStatus },
+  params: { id: string; status: TaskStatus; waiting_on?: string },
 ): Promise<Task | null> {
   const found = await findTaskFile(ctx.tasksDir, params.id);
   if (!found) return null;
@@ -18,8 +19,26 @@ export async function taskMove(
   const content = await Bun.file(found.filePath).text();
   const task = parseTask(content);
 
+  const previousStatus = task.status;
   task.status = params.status;
   task.updated = new Date().toISOString();
+
+  // Auto-set completed_at when moving to done
+  if (params.status === "done" && previousStatus !== "done") {
+    task.completed_at = task.updated;
+  }
+  // Clear completed_at when moving away from done
+  if (params.status !== "done" && previousStatus === "done") {
+    task.completed_at = undefined;
+  }
+
+  // Set/clear waiting_on
+  if (params.status === "waiting" && params.waiting_on) {
+    task.waiting_on = params.waiting_on;
+  }
+  if (params.status !== "waiting") {
+    task.waiting_on = undefined;
+  }
 
   const slug = path.basename(found.filePath, ".md");
   const newPath = resolveTaskPath(ctx.tasksDir, params.status, slug);
@@ -69,13 +88,59 @@ export async function taskLog(
   return task;
 }
 
+// Detect if adding a link would create a cycle in the dependency graph
+async function wouldCreateCycle(
+  tasksDir: string,
+  fromId: string,
+  toId: string,
+  linkType: "depends_on" | "blocks",
+): Promise<boolean> {
+  // If A depends_on B, check that B doesn't already (transitively) depend on A
+  // If A blocks B, check that B doesn't already (transitively) block A
+  const startId = linkType === "depends_on" ? toId : fromId;
+  const targetId = linkType === "depends_on" ? fromId : toId;
+
+  const visited = new Set<string>();
+  const queue = [startId];
+
+  while (queue.length > 0) {
+    const current = queue.pop()!;
+    if (current === targetId) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    const found = await findTaskFile(tasksDir, current);
+    if (!found) continue;
+    try {
+      const content = await Bun.file(found.filePath).text();
+      const { data } = matter(content);
+      const deps = (data.depends_on as string[] | undefined) ?? [];
+      for (const dep of deps) {
+        if (!visited.has(dep)) queue.push(dep);
+      }
+    } catch { /* skip */ }
+  }
+  return false;
+}
+
 export async function taskLink(
   ctx: AppContext,
   params: { from: string; to: string; type: "depends_on" | "blocks" },
 ): Promise<{ from: Task; to: Task } | null> {
+  // Prevent self-links
+  if (params.from === params.to) {
+    throw new Error("Cannot link a task to itself");
+  }
+
   const fromFound = await findTaskFile(ctx.tasksDir, params.from);
   const toFound = await findTaskFile(ctx.tasksDir, params.to);
   if (!fromFound || !toFound) return null;
+
+  // Detect cycles
+  const wouldCycle = await wouldCreateCycle(ctx.tasksDir, params.from, params.to, params.type);
+  if (wouldCycle) {
+    throw new Error(`Cannot create link: would create a circular dependency between ${params.from} and ${params.to}`);
+  }
 
   const fromContent = await Bun.file(fromFound.filePath).text();
   const toContent = await Bun.file(toFound.filePath).text();
@@ -114,7 +179,7 @@ interface BatchOperation {
 async function writeCreate(ctx: AppContext, params: Record<string, unknown>): Promise<Task> {
   const settings = await ctx.getSettings();
   const id = generateId();
-  const slug = slugify(params.title as string);
+  const filename = taskFilename(params.title as string, id);
   const now = new Date().toISOString();
   const task: Task = {
     id,
@@ -129,7 +194,7 @@ async function writeCreate(ctx: AppContext, params: Record<string, unknown>): Pr
     assignee: (params.assignee as string) || settings.default_assignee || undefined,
     body: (params.body as string) ?? "",
   };
-  const filePath = resolveTaskPath(ctx.tasksDir, "inbox", slug);
+  const filePath = resolveTaskPath(ctx.tasksDir, "inbox", filename);
   await mkdir(path.dirname(filePath), { recursive: true });
   await Bun.write(filePath, serializeTask(task));
   return task;
@@ -143,12 +208,21 @@ async function writeUpdate(ctx: AppContext, params: Record<string, unknown>): Pr
   if (params.title !== undefined) task.title = params.title as string;
   if (params.priority !== undefined) task.priority = params.priority as Priority;
   if (params.tags !== undefined) task.tags = params.tags as string[];
+  if ((params.add_tags as string[] | undefined)?.length) {
+    task.tags = [...new Set([...task.tags, ...(params.add_tags as string[])])];
+  }
+  if ((params.remove_tags as string[] | undefined)?.length) {
+    task.tags = task.tags.filter((t) => !(params.remove_tags as string[]).includes(t));
+  }
   if (params.body !== undefined) task.body = params.body as string;
+  if (params.waiting_on !== undefined) task.waiting_on = params.waiting_on as string;
   task.updated = new Date().toISOString();
+
+  const expectedFilename = taskFilename(task.title, task.id);
+  const currentFilename = path.basename(found.filePath, ".md");
   let filePath = found.filePath;
-  if (params.title !== undefined) {
-    const newSlug = slugify(params.title as string);
-    const newPath = path.join(path.dirname(found.filePath), `${newSlug}.md`);
+  if (expectedFilename !== currentFilename) {
+    const newPath = path.join(path.dirname(found.filePath), `${expectedFilename}.md`);
     if (newPath !== found.filePath) {
       await rm(found.filePath);
       filePath = newPath;
@@ -163,8 +237,15 @@ async function writeMove(ctx: AppContext, params: Record<string, unknown>): Prom
   if (!found) throw new Error(`Task ${params.id} not found during batch execution`);
   const content = await Bun.file(found.filePath).text();
   const task = parseTask(content);
+  const previousStatus = task.status;
   task.status = params.status as TaskStatus;
   task.updated = new Date().toISOString();
+
+  if (task.status === "done" && previousStatus !== "done") task.completed_at = task.updated;
+  if (task.status !== "done" && previousStatus === "done") task.completed_at = undefined;
+  if (task.status === "waiting" && params.waiting_on) task.waiting_on = params.waiting_on as string;
+  if (task.status !== "waiting") task.waiting_on = undefined;
+
   const slug = path.basename(found.filePath, ".md");
   const newPath = resolveTaskPath(ctx.tasksDir, task.status, slug);
   await mkdir(path.dirname(newPath), { recursive: true });
@@ -203,6 +284,39 @@ async function writeLog(ctx: AppContext, params: Record<string, unknown>): Promi
   return task;
 }
 
+async function writeLink(ctx: AppContext, params: Record<string, unknown>): Promise<{ from: string; to: string }> {
+  const from = params.from as string;
+  const to = params.to as string;
+  const type = params.type as "depends_on" | "blocks";
+
+  if (from === to) throw new Error("Cannot link a task to itself");
+
+  const fromFound = await findTaskFile(ctx.tasksDir, from);
+  const toFound = await findTaskFile(ctx.tasksDir, to);
+  if (!fromFound || !toFound) throw new Error(`One or both tasks not found: ${from}, ${to}`);
+
+  const fromContent = await Bun.file(fromFound.filePath).text();
+  const toContent = await Bun.file(toFound.filePath).text();
+  const fromTask = parseTask(fromContent);
+  const toTask = parseTask(toContent);
+  const now = new Date().toISOString();
+
+  if (type === "depends_on") {
+    fromTask.depends_on = [...new Set([...(fromTask.depends_on ?? []), to])];
+    toTask.blocks = [...new Set([...(toTask.blocks ?? []), from])];
+  } else {
+    fromTask.blocks = [...new Set([...(fromTask.blocks ?? []), to])];
+    toTask.depends_on = [...new Set([...(toTask.depends_on ?? []), from])];
+  }
+
+  fromTask.updated = now;
+  toTask.updated = now;
+
+  await Bun.write(fromFound.filePath, serializeTask(fromTask));
+  await Bun.write(toFound.filePath, serializeTask(toTask));
+  return { from, to };
+}
+
 export async function taskBatch(
   ctx: AppContext,
   params: { operations: BatchOperation[] },
@@ -230,6 +344,10 @@ export async function taskBatch(
         }
         break;
       }
+      case "link": {
+        if (!operation.params.from || !operation.params.to) throw new Error(`Batch validation failed: link requires from and to`);
+        break;
+      }
       default:
         throw new Error(`Batch validation failed: unknown operation ${operation.op}`);
     }
@@ -247,6 +365,7 @@ export async function taskBatch(
         case "move": results.push(await writeMove(ctx, operation.params)); break;
         case "delete": results.push(await writeDelete(ctx, operation.params)); break;
         case "log": results.push(await writeLog(ctx, operation.params)); break;
+        case "link": results.push(await writeLink(ctx, operation.params)); break;
       }
     }
   });

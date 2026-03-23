@@ -1,11 +1,12 @@
-import { generateId, slugify, parseTask, serializeTask, resolveTaskPath } from "../task.ts";
+import { generateId, slugify, taskFilename, parseTask, serializeTask, resolveTaskPath } from "../task.ts";
 import { findTaskFile, findFilesRecursive } from "../task-finder.ts";
 import { withGitSync, formatCommitMessage } from "../git.ts";
 import type { AppContext } from "../context.ts";
 import type { Task, TaskStatus, Priority } from "../types.ts";
-import { TASK_STATUSES } from "../types.ts";
+import { TASK_STATUSES, PRIORITIES } from "../types.ts";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
+import matter from "gray-matter";
 
 export async function taskCreate(
   ctx: AppContext,
@@ -13,7 +14,7 @@ export async function taskCreate(
 ): Promise<Task> {
   const settings = await ctx.getSettings();
   const id = generateId();
-  const slug = slugify(params.title);
+  const filename = taskFilename(params.title, id);
   const now = new Date().toISOString();
 
   const task: Task = {
@@ -30,7 +31,7 @@ export async function taskCreate(
     body: params.body ?? "",
   };
 
-  const filePath = resolveTaskPath(ctx.tasksDir, "inbox", slug);
+  const filePath = resolveTaskPath(ctx.tasksDir, "inbox", filename);
   const message = formatCommitMessage("create", params.title, id);
 
   await withGitSync(ctx.git, ctx.store, message, async () => {
@@ -50,7 +51,12 @@ export async function taskGet(ctx: AppContext, params: { id: string }): Promise<
 
 export async function taskUpdate(
   ctx: AppContext,
-  params: { id: string; title?: string; priority?: string; tags?: string[]; project?: string; due?: string; assignee?: string; body?: string; depends_on?: string[]; blocks?: string[] },
+  params: {
+    id: string; title?: string; priority?: string; tags?: string[];
+    add_tags?: string[]; remove_tags?: string[];
+    project?: string; due?: string; assignee?: string; waiting_on?: string;
+    body?: string; depends_on?: string[]; blocks?: string[];
+  },
 ): Promise<Task | null> {
   const found = await findTaskFile(ctx.tasksDir, params.id);
   if (!found) return null;
@@ -61,32 +67,62 @@ export async function taskUpdate(
   if (params.title !== undefined) task.title = params.title;
   if (params.priority !== undefined) task.priority = params.priority as Priority;
   if (params.tags !== undefined) task.tags = params.tags;
+  if (params.add_tags?.length) task.tags = [...new Set([...task.tags, ...params.add_tags])];
+  if (params.remove_tags?.length) task.tags = task.tags.filter((t) => !params.remove_tags!.includes(t));
   if (params.project !== undefined) task.project = params.project;
   if (params.due !== undefined) task.due = params.due;
   if (params.assignee !== undefined) task.assignee = params.assignee;
+  if (params.waiting_on !== undefined) task.waiting_on = params.waiting_on;
   if (params.body !== undefined) task.body = params.body;
   if (params.depends_on !== undefined) task.depends_on = params.depends_on;
   if (params.blocks !== undefined) task.blocks = params.blocks;
   task.updated = new Date().toISOString();
 
-  const titleChanged = params.title !== undefined && slugify(params.title) !== path.basename(found.filePath, ".md");
+  // Always use ID-based filename to prevent collisions
+  const expectedFilename = taskFilename(task.title, task.id);
+  const currentFilename = path.basename(found.filePath, ".md");
+  const needsRename = expectedFilename !== currentFilename;
   let newFilePath = found.filePath;
 
-  if (titleChanged) {
-    const newSlug = slugify(params.title!);
-    newFilePath = path.join(path.dirname(found.filePath), `${newSlug}.md`);
+  if (needsRename) {
+    newFilePath = path.join(path.dirname(found.filePath), `${expectedFilename}.md`);
   }
 
   const message = formatCommitMessage("update", task.title, params.id);
 
   await withGitSync(ctx.git, ctx.store, message, async () => {
-    if (titleChanged && newFilePath !== found.filePath) {
+    if (needsRename && newFilePath !== found.filePath) {
       await rm(found.filePath);
     }
     await Bun.write(newFilePath, serializeTask(task));
   });
 
   return task;
+}
+
+// Remove references to a deleted task from all other tasks' depends_on/blocks arrays
+async function cascadeDeleteReferences(tasksDir: string, deletedId: string): Promise<void> {
+  for (const status of TASK_STATUSES) {
+    const dir = path.join(tasksDir, status);
+    const files = await findFilesRecursive(dir);
+    for (const file of files) {
+      if (!file.endsWith(".md")) continue;
+      try {
+        const content = await Bun.file(file).text();
+        const { data } = matter(content);
+        const dependsOn = (data.depends_on as string[] | undefined) ?? [];
+        const blocks = (data.blocks as string[] | undefined) ?? [];
+        const hadRef = dependsOn.includes(deletedId) || blocks.includes(deletedId);
+        if (!hadRef) continue;
+
+        const task = parseTask(content);
+        task.depends_on = (task.depends_on ?? []).filter((id) => id !== deletedId);
+        task.blocks = (task.blocks ?? []).filter((id) => id !== deletedId);
+        task.updated = new Date().toISOString();
+        await Bun.write(file, serializeTask(task));
+      } catch { /* skip unreadable files */ }
+    }
+  }
 }
 
 export async function taskDelete(
@@ -100,6 +136,7 @@ export async function taskDelete(
     const message = formatCommitMessage("delete", `Permanently delete`, params.id);
     await withGitSync(ctx.git, ctx.store, message, async () => {
       await rm(found.filePath);
+      await cascadeDeleteReferences(ctx.tasksDir, params.id);
     });
   } else {
     const content = await Bun.file(found.filePath).text();
@@ -117,15 +154,21 @@ export async function taskDelete(
       if (found.filePath !== archivePath) {
         await rm(found.filePath);
       }
+      await cascadeDeleteReferences(ctx.tasksDir, params.id);
     });
   }
 
   return true;
 }
 
+const PRIORITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+
 export async function taskList(
   ctx: AppContext,
-  params: { status?: string; priority?: string; tag?: string; assignee?: string; project?: string },
+  params: {
+    status?: string; priority?: string; tag?: string; assignee?: string; project?: string;
+    sortBy?: string; sortOrder?: string; limit?: number; offset?: number;
+  },
 ): Promise<Task[]> {
   const statuses: TaskStatus[] = params.status
     ? [params.status as TaskStatus]
@@ -146,11 +189,38 @@ export async function taskList(
     }
   }
 
-  return tasks.filter((t) => {
+  let filtered = tasks.filter((t) => {
     if (params.priority && t.priority !== params.priority) return false;
     if (params.tag && !t.tags.includes(params.tag)) return false;
     if (params.assignee && t.assignee !== params.assignee) return false;
     if (params.project && t.project !== params.project) return false;
     return true;
   });
+
+  // Sort
+  const sortBy = params.sortBy ?? "created";
+  const sortOrder = params.sortOrder === "asc" ? 1 : -1;
+  filtered.sort((a, b) => {
+    switch (sortBy) {
+      case "priority":
+        return ((PRIORITY_ORDER[a.priority] ?? 2) - (PRIORITY_ORDER[b.priority] ?? 2)) * sortOrder;
+      case "due": {
+        const aTime = a.due ? new Date(a.due).getTime() : Infinity;
+        const bTime = b.due ? new Date(b.due).getTime() : Infinity;
+        return (aTime - bTime) * sortOrder;
+      }
+      case "title":
+        return a.title.localeCompare(b.title) * sortOrder;
+      case "updated":
+        return (new Date(a.updated).getTime() - new Date(b.updated).getTime()) * sortOrder;
+      case "created":
+      default:
+        return (new Date(a.created).getTime() - new Date(b.created).getTime()) * sortOrder;
+    }
+  });
+
+  // Paginate
+  const offset = params.offset ?? 0;
+  const limit = params.limit ?? 100;
+  return filtered.slice(offset, offset + limit);
 }
