@@ -108,8 +108,8 @@ export async function createServer() {
     gitignoreContent = gitignoreContent ? `${gitignoreContent.trimEnd()}\n.qmd/\n` : ".qmd/\n";
     gitignoreChanged = true;
   }
-  if (!gitignoreContent.includes(".oauth.sqlite")) {
-    gitignoreContent = `${gitignoreContent.trimEnd()}\n.oauth.sqlite\n`;
+  if (!gitignoreContent.includes(".task-fabric.sqlite")) {
+    gitignoreContent = `${gitignoreContent.trimEnd()}\n.task-fabric.sqlite\n`;
     gitignoreChanged = true;
   }
   if (gitignoreChanged) {
@@ -453,7 +453,7 @@ if (import.meta.main) {
   const { store } = ctx;
 
   const issuerUrl = new URL(env.SERVER_URL || `http://localhost:${env.PORT}`);
-  const oauthDbPath = path.join(env.TASKS_DIR, ".oauth.sqlite");
+  const oauthDbPath = path.join(env.TASKS_DIR, ".task-fabric.sqlite");
   const oauthProvider = new TaskFabricOAuthProvider(env.API_KEY, oauthDbPath);
 
   const { app, sessions } = createApp({
