@@ -66,6 +66,8 @@ export async function reindex(store: Store, collections?: string[]): Promise<voi
 }
 
 export async function embedAll(store: Store): Promise<void> {
+  // Skip embedding when explicitly disabled (CI, test environments without models)
+  if (process.env.DISABLE_EMBEDDING === "true") return;
   await store.embed({});
 }
 
