@@ -8,6 +8,7 @@ import { authMiddleware } from "./auth.ts";
 import type { AppContext } from "./context.ts";
 import type { SimpleGit } from "simple-git";
 import { TASK_STATUSES } from "./types.ts";
+import { z } from "zod/v4";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import simpleGit from "simple-git";
@@ -16,7 +17,7 @@ import simpleGit from "simple-git";
 import { taskCreate, taskGet, taskUpdate, taskDelete, taskList } from "./tools/crud.ts";
 import { taskSearch, taskExpandQuery, taskStructuredSearch } from "./tools/search.ts";
 import { taskMove, taskLog, taskLink, taskBatch } from "./tools/workflow.ts";
-import { taskDashboard, taskTimeline, taskGraph } from "./tools/views.ts";
+import { taskDashboard, taskTimeline, taskGraph, taskSummary, taskRecent, taskCompletionReport, taskAutoArchive } from "./tools/views.ts";
 import { syncStatus, syncPull, syncHistory, syncDiff, syncRestore } from "./tools/sync.ts";
 import { settingsGet, settingsUpdate } from "./tools/settings-tools.ts";
 
@@ -26,6 +27,7 @@ import {
   taskSearchSchema, taskExpandQuerySchema, taskStructuredSearchSchema,
   taskMoveSchema, taskLogSchema, taskLinkSchema, taskBatchSchema,
   taskDashboardSchema, taskTimelineSchema,
+  taskReindexSchema, taskAutoArchiveSchema,
   syncHistorySchema, syncDiffSchema, syncRestoreSchema,
   settingsUpdateSchema,
 } from "./tools/schemas.ts";
@@ -217,6 +219,49 @@ export async function createServer() {
       return { content: [{ type: "text", text: JSON.stringify(graph) }] };
     });
 
+    mcp.registerTool("task_summary", {
+      description: "Get task counts grouped by project or assignee, with status and priority breakdowns",
+      inputSchema: z.object({ groupBy: z.enum(["project", "assignee"]) }),
+    }, async (params) => {
+      const summary = await taskSummary(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(summary) }] };
+    });
+
+    mcp.registerTool("task_recent", {
+      description: "Get recently modified tasks, sorted by last update time",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(100).optional() }),
+    }, async (params) => {
+      const recent = await taskRecent(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(recent) }] };
+    });
+
+    mcp.registerTool("task_completion_report", {
+      description: "Get tasks completed within a date range. Defaults to last 7 days. Use for weekly standups and velocity tracking.",
+      inputSchema: z.object({ since: z.string().optional(), until: z.string().optional() }),
+    }, async (params) => {
+      const report = await taskCompletionReport(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(report) }] };
+    });
+
+    mcp.registerTool("task_auto_archive", {
+      description: "Archive done tasks older than auto_archive_after_days setting. Use dryRun=true to preview without archiving.",
+      inputSchema: taskAutoArchiveSchema,
+    }, async (params) => {
+      const result = await taskAutoArchive(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    });
+
+    mcp.registerTool("task_reindex", {
+      description: "Force a full re-index of the QMD search database. Use embed=true to also regenerate vector embeddings.",
+      inputSchema: taskReindexSchema,
+    }, async (params) => {
+      await reindex(store);
+      if (params.embed) {
+        try { await embedAll(store); } catch { /* models may not be available */ }
+      }
+      return { content: [{ type: "text", text: JSON.stringify({ message: `Re-index complete${params.embed ? " (with embeddings)" : ""}` }) }] };
+    });
+
     mcp.registerTool("sync_status", { description: "Get git sync status" }, async () => {
       const status = await syncStatus(ctx);
       return { content: [{ type: "text", text: JSON.stringify(status) }] };
@@ -340,4 +385,20 @@ if (import.meta.main) {
   });
 
   console.log(`TaskFabric MCP server running on port ${env.PORT}`);
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    console.log("Shutting down gracefully...");
+    serverStatus = "error";
+    statusMessage = "shutting down";
+    for (const [id, session] of sessions) {
+      try { await session.transport.close(); } catch { /* best effort */ }
+      sessions.delete(id);
+    }
+    try { await closeStore(store); } catch { /* best effort */ }
+    process.exit(0);
+  };
+
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 }

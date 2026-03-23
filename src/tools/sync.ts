@@ -1,5 +1,5 @@
 import { getHistory, getDiff, restoreFile } from "../git.ts";
-import { reindex } from "../store.ts";
+import { reindex, embedAll } from "../store.ts";
 import { withGitSync, formatCommitMessage } from "../git.ts";
 import { findTaskFile } from "../task-finder.ts";
 import type { AppContext } from "../context.ts";
@@ -21,7 +21,8 @@ export async function syncPull(ctx: AppContext): Promise<{ message: string }> {
       await ctx.git.pull({ "--rebase": null });
     }
     await reindex(ctx.store);
-    return { message: "Pull and re-index complete" };
+    try { await embedAll(ctx.store); } catch { /* models may not be available */ }
+    return { message: "Pull, re-index, and embed complete" };
   } catch (err) {
     return { message: `Pull failed: ${err instanceof Error ? err.message : String(err)}` };
   }

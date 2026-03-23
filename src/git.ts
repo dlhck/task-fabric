@@ -1,5 +1,5 @@
 import simpleGit, { type SimpleGit } from "simple-git";
-import { reindex, type Store } from "./store.ts";
+import { reindex, embedAll, type Store } from "./store.ts";
 
 export async function initGit(repoPath: string): Promise<SimpleGit> {
   const git = simpleGit(repoPath);
@@ -24,6 +24,14 @@ export async function withGitSync<T>(
   const result = await fn();
 
   await reindex(store);
+
+  // Incrementally embed new/changed documents (only processes documents without embeddings)
+  try {
+    await embedAll(store);
+  } catch {
+    // Models may not be available — keyword search still works
+  }
+
   await git.add(".");
   await git.commit(message);
 
@@ -31,11 +39,19 @@ export async function withGitSync<T>(
     const remotes = await git.getRemotes();
     if (remotes.length > 0) {
       const branch = (await git.branchLocal()).current;
-      // Pull first, but skip if remote branch doesn't exist yet (first push)
+      // Pull first, but handle conflicts
       try {
         await git.pull("origin", branch, { "--rebase": null });
-      } catch {
-        // Remote branch doesn't exist yet — that's fine, just push
+      } catch (pullErr) {
+        // If rebase failed with conflicts, abort and try regular merge
+        try {
+          await git.rebase(["--abort"]);
+        } catch { /* may not be in rebase state */ }
+        try {
+          await git.pull("origin", branch);
+        } catch {
+          // Remote branch doesn't exist yet or offline — push will create it
+        }
       }
       await git.push("origin", branch, { "-u": null });
     }
