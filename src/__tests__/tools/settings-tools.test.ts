@@ -27,4 +27,18 @@ describe("settingsUpdate", () => {
     const settings = await settingsGet(env.ctx);
     expect(settings.default_priority).toBe("high");
   });
+
+  test("accepts valid IANA timezone", async () => {
+    const result = await settingsUpdate(env.ctx, { timezone: "America/New_York" });
+    expect(result.timezone).toBe("America/New_York");
+  });
+
+  test("rejects invalid timezone", async () => {
+    await expect(settingsUpdate(env.ctx, { timezone: "Fake/Zone" })).rejects.toThrow();
+  });
+
+  test("defaults timezone to UTC", async () => {
+    const settings = await settingsGet(env.ctx);
+    expect(settings.timezone).toBe("UTC");
+  });
 });

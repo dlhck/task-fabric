@@ -29,4 +29,5 @@ export interface Settings {
   auto_archive_after_days: number;
   default_priority: Priority;
   default_assignee: string;
+  timezone: string;
 }

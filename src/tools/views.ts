@@ -2,6 +2,7 @@ import { taskList } from "./crud.ts";
 import { parseTask, serializeTask, resolveTaskPath } from "../task.ts";
 import { findFilesRecursive } from "../task-finder.ts";
 import { withGitSync, formatCommitMessage } from "../git.ts";
+import { todayInTimezone, addDaysToDate } from "../util.ts";
 import type { AppContext } from "../context.ts";
 import type { Task, TaskStatus } from "../types.ts";
 import { TASK_STATUSES, DATED_STATUSES } from "../types.ts";
@@ -16,14 +17,20 @@ interface DashboardResult {
   due_soon: { id: string; title: string; due: string }[];
   recently_completed: { id: string; title: string; completed_at: string }[];
   waiting: { id: string; title: string; waiting_on?: string }[];
+  timezone: string;
 }
 
 export async function taskDashboard(
   ctx: AppContext,
   params: { now?: string },
 ): Promise<DashboardResult> {
-  const now = params.now ? new Date(params.now) : new Date();
   const settings = await ctx.getSettings();
+  const tz = settings.timezone;
+  const now = params.now ? new Date(params.now) : new Date();
+
+  // "today" in the user's timezone as YYYY-MM-DD for date-only comparisons
+  const today = todayInTimezone(tz, now);
+  const dueSoonEnd = addDaysToDate(today, settings.due_soon_days, tz);
 
   const statuses: TaskStatus[] = [...TASK_STATUSES];
   const counts: Record<string, number> = {};
@@ -40,27 +47,24 @@ export async function taskDashboard(
     }
   }
 
-  const dueSoonCutoff = new Date(now);
-  dueSoonCutoff.setDate(dueSoonCutoff.getDate() + settings.due_soon_days);
-
   const overdue: DashboardResult["overdue"] = [];
   const dueSoon: DashboardResult["due_soon"] = [];
 
   for (const task of allTasks) {
     if (!task.due) continue;
-    const dueDate = new Date(task.due);
-    if (dueDate < now) {
+    // Due dates are YYYY-MM-DD — compare as strings in user's timezone
+    const dueDay = task.due.slice(0, 10); // normalize to date-only
+    if (dueDay < today) {
       overdue.push({ id: task.id, title: task.title, due: task.due });
-    } else if (dueDate <= dueSoonCutoff) {
+    } else if (dueDay <= dueSoonEnd) {
       dueSoon.push({ id: task.id, title: task.title, due: task.due });
     }
   }
 
-  // Recently completed (last 7 days)
-  const weekAgo = new Date(now);
-  weekAgo.setDate(weekAgo.getDate() - 7);
+  // Recently completed (last 7 days) — completed_at is full ISO, tz doesn't affect comparison
+  const weekAgoMs = now.getTime() - 7 * 86400000;
   const recentlyCompleted = doneTasks
-    .filter((t) => t.completed_at && new Date(t.completed_at) >= weekAgo)
+    .filter((t) => t.completed_at && new Date(t.completed_at).getTime() >= weekAgoMs)
     .sort((a, b) => new Date(b.completed_at!).getTime() - new Date(a.completed_at!).getTime())
     .slice(0, 20)
     .map((t) => ({ id: t.id, title: t.title, completed_at: t.completed_at! }));
@@ -70,7 +74,7 @@ export async function taskDashboard(
     .filter((t) => t.status === "waiting")
     .map((t) => ({ id: t.id, title: t.title, waiting_on: t.waiting_on }));
 
-  return { counts, overdue, due_soon: dueSoon, recently_completed: recentlyCompleted, waiting };
+  return { counts, overdue, due_soon: dueSoon, recently_completed: recentlyCompleted, waiting, timezone: tz };
 }
 
 export async function taskTimeline(
@@ -87,17 +91,16 @@ export async function taskTimeline(
 
   let withDue = allTasks.filter((t) => t.due);
 
-  // Date range filtering
+  // Date range filtering — due dates are YYYY-MM-DD, params are also YYYY-MM-DD
   if (params.dueAfter) {
-    const after = new Date(params.dueAfter);
-    withDue = withDue.filter((t) => new Date(t.due!) >= after);
+    withDue = withDue.filter((t) => t.due!.slice(0, 10) >= params.dueAfter!);
   }
   if (params.dueBefore) {
-    const before = new Date(params.dueBefore);
-    withDue = withDue.filter((t) => new Date(t.due!) <= before);
+    withDue = withDue.filter((t) => t.due!.slice(0, 10) <= params.dueBefore!);
   }
 
-  withDue.sort((a, b) => new Date(a.due!).getTime() - new Date(b.due!).getTime());
+  // Sort by due date (string sort works for YYYY-MM-DD)
+  withDue.sort((a, b) => a.due!.localeCompare(b.due!));
 
   return withDue.slice(0, params.limit ?? 50).map((t) => ({
     id: t.id,
@@ -137,7 +140,7 @@ export async function taskGraph(
   return { nodes };
 }
 
-// M2: Summary view by project or assignee
+// Summary view by project or assignee
 interface SummaryGroup {
   name: string;
   total: number;
@@ -173,7 +176,7 @@ export async function taskSummary(
   }).sort((a, b) => b.total - a.total);
 }
 
-// M3: Recently modified tasks
+// Recently modified tasks
 export async function taskRecent(
   ctx: AppContext,
   params: { limit?: number },
@@ -193,7 +196,7 @@ export async function taskRecent(
   }));
 }
 
-// M4: Completion report for a date range
+// Completion report for a date range
 export async function taskCompletionReport(
   ctx: AppContext,
   params: { since?: string; until?: string },
@@ -222,19 +225,21 @@ export async function taskCompletionReport(
   };
 }
 
-// B5: Auto-archive done tasks older than settings.auto_archive_after_days
+// Auto-archive done tasks older than settings.auto_archive_after_days
 export async function taskAutoArchive(
   ctx: AppContext,
   params: { dryRun?: boolean },
 ): Promise<{ archived: { id: string; title: string }[]; count: number }> {
   const settings = await ctx.getSettings();
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - settings.auto_archive_after_days);
+  const tz = settings.timezone;
+  const cutoffDate = addDaysToDate(todayInTimezone(tz), -settings.auto_archive_after_days, tz);
 
   const doneTasks = await taskList(ctx, { status: "done" });
   const eligible = doneTasks.filter((t) => {
-    const completedDate = t.completed_at ? new Date(t.completed_at) : new Date(t.updated);
-    return completedDate < cutoff;
+    // Use completed_at date (or updated as fallback) in user's timezone
+    const ts = t.completed_at ?? t.updated;
+    const day = todayInTimezone(tz, new Date(ts));
+    return day <= cutoffDate;
   });
 
   if (params.dryRun || eligible.length === 0) {
@@ -248,7 +253,6 @@ export async function taskAutoArchive(
 
   await withGitSync(ctx.git, ctx.store, message, async () => {
     for (const task of eligible) {
-      // Find the actual file
       const dir = path.join(ctx.tasksDir, "done");
       const files = await findFilesRecursive(dir);
       for (const file of files) {

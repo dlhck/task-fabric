@@ -154,4 +154,5 @@ export const settingsUpdateSchema = z.object({
   auto_archive_after_days: z.number().int().min(1).optional(),
   default_priority: z.enum(["low", "medium", "high", "critical"]).optional(),
   default_assignee: z.string().optional(),
+  timezone: z.string().optional(),
 });

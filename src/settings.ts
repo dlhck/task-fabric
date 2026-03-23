@@ -8,13 +8,24 @@ export const DEFAULTS: Settings = {
   auto_archive_after_days: 30,
   default_priority: "medium",
   default_assignee: "",
+  timezone: "UTC",
 };
+
+function isValidTimezone(tz: string): boolean {
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const settingsSchema = z.object({
   due_soon_days: z.number().int().min(1).optional(),
   auto_archive_after_days: z.number().int().min(1).optional(),
   default_priority: z.enum(PRIORITIES).optional(),
   default_assignee: z.string().optional(),
+  timezone: z.string().refine(isValidTimezone, "Must be a valid IANA timezone (e.g. 'America/New_York', 'Europe/Berlin')").optional(),
 });
 
 export function validateSettings(input: unknown): Partial<Settings> {

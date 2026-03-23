@@ -32,6 +32,20 @@ describe("taskDashboard", () => {
     expect(dashboard.due_soon.length).toBe(1);
     expect(dashboard.due_soon[0]!.title).toBe("Due soon");
   });
+
+  test("returns timezone in response", async () => {
+    const dashboard = await taskDashboard(env.ctx, {});
+    expect(dashboard.timezone).toBe("UTC");
+  });
+
+  test("overdue respects timezone setting", async () => {
+    // A task due 2026-03-21 should NOT be overdue at 2026-03-21T02:00:00Z
+    // when timezone is UTC (March 21 is today, not overdue)
+    await taskCreate(env.ctx, { title: "TZ test", due: "2026-03-21" });
+
+    const utcDashboard = await taskDashboard(env.ctx, { now: "2026-03-21T02:00:00Z" });
+    expect(utcDashboard.overdue.length).toBe(0);
+  });
 });
 
 describe("taskTimeline", () => {
