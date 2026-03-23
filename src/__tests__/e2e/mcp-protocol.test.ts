@@ -14,7 +14,7 @@ afterAll(async () => {
 describe("tool discovery", () => {
   test("listTools returns all registered tools", async () => {
     const { tools } = await e2e.client.listTools();
-    expect(tools.length).toBe(22);
+    expect(tools.length).toBe(27);
 
     const names = tools.map((t) => t.name).sort();
     expect(names).toContain("task_create");
@@ -32,6 +32,11 @@ describe("tool discovery", () => {
     expect(names).toContain("task_dashboard");
     expect(names).toContain("task_timeline");
     expect(names).toContain("task_graph");
+    expect(names).toContain("task_summary");
+    expect(names).toContain("task_recent");
+    expect(names).toContain("task_completion_report");
+    expect(names).toContain("task_auto_archive");
+    expect(names).toContain("task_reindex");
     expect(names).toContain("sync_status");
     expect(names).toContain("sync_pull");
     expect(names).toContain("sync_history");

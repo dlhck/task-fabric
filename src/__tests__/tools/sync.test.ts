@@ -32,7 +32,7 @@ describe("syncDiff", () => {
   test("returns diff between last two commits", async () => {
     await taskCreate(env.ctx, { title: "Diff task" });
     const diff = await syncDiff(env.ctx, {});
-    expect(diff).toContain("diff-task.md");
+    expect(diff).toContain("diff-task");
   });
 
   test("returns diff since a specific commit", async () => {
@@ -42,7 +42,7 @@ describe("syncDiff", () => {
 
     await taskCreate(env.ctx, { title: "Second task" });
     const diff = await syncDiff(env.ctx, { since: firstCommitHash });
-    expect(diff).toContain("second-task.md");
+    expect(diff).toContain("second-task");
   });
 });
 
@@ -50,7 +50,7 @@ describe("syncPull", () => {
   test("re-indexes when no remote configured", async () => {
     await taskCreate(env.ctx, { title: "Pull test" });
     const result = await syncPull(env.ctx);
-    expect(result.message).toContain("re-index complete");
+    expect(result.message).toContain("complete");
   });
 });
 

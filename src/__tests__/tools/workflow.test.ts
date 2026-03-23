@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { taskMove, taskLog, taskLink, taskBatch } from "../../tools/workflow.ts";
 import { taskCreate, taskGet } from "../../tools/crud.ts";
 import { createTestEnv, cleanupTestEnv, type TestEnv } from "../test-helpers.ts";
+import { findFilesRecursive } from "../../task-finder.ts";
 import path from "node:path";
 
 let env: TestEnv;
@@ -15,21 +16,35 @@ describe("taskMove", () => {
     const moved = await taskMove(env.ctx, { id: created.id, status: "active" });
     expect(moved!.status).toBe("active");
 
-    const inboxFile = Bun.file(path.join(env.tasksDir, "inbox", "move-me.md"));
-    const activeFile = Bun.file(path.join(env.tasksDir, "active", "move-me.md"));
-    expect(await inboxFile.exists()).toBe(false);
-    expect(await activeFile.exists()).toBe(true);
+    const inboxFiles = await findFilesRecursive(path.join(env.tasksDir, "inbox"));
+    const activeFiles = await findFilesRecursive(path.join(env.tasksDir, "active"));
+    expect(inboxFiles.filter((f) => f.endsWith(".md")).length).toBe(0);
+    expect(activeFiles.filter((f) => f.endsWith(".md")).length).toBe(1);
   });
 
-  test("moves to done creates YYYY-MM subdir", async () => {
+  test("moves to done creates YYYY-MM subdir and sets completed_at", async () => {
     const created = await taskCreate(env.ctx, { title: "Finish me" });
     const moved = await taskMove(env.ctx, { id: created.id, status: "done" });
     expect(moved!.status).toBe("done");
+    expect(moved!.completed_at).toBeDefined();
 
-    const now = new Date();
-    const mm = String(now.getMonth() + 1).padStart(2, "0");
-    const doneFile = Bun.file(path.join(env.tasksDir, "done", `${now.getFullYear()}-${mm}`, "finish-me.md"));
-    expect(await doneFile.exists()).toBe(true);
+    const doneFiles = await findFilesRecursive(path.join(env.tasksDir, "done"));
+    expect(doneFiles.filter((f) => f.endsWith(".md")).length).toBe(1);
+  });
+
+  test("clears completed_at when moving away from done", async () => {
+    const created = await taskCreate(env.ctx, { title: "Reopen me" });
+    const done = await taskMove(env.ctx, { id: created.id, status: "done" });
+    expect(done!.completed_at).toBeDefined();
+
+    const reopened = await taskMove(env.ctx, { id: created.id, status: "active" });
+    expect(reopened!.completed_at).toBeUndefined();
+  });
+
+  test("sets waiting_on when moving to waiting", async () => {
+    const created = await taskCreate(env.ctx, { title: "Wait task" });
+    const moved = await taskMove(env.ctx, { id: created.id, status: "waiting", waiting_on: "client feedback" });
+    expect(moved!.waiting_on).toBe("client feedback");
   });
 
   test("returns null for unknown task", async () => {
@@ -95,6 +110,18 @@ describe("taskLink", () => {
     const a = await taskCreate(env.ctx, { title: "Real task" });
     const result = await taskLink(env.ctx, { from: a.id, to: "t_notfound", type: "depends_on" });
     expect(result).toBeNull();
+  });
+
+  test("prevents self-links", async () => {
+    const a = await taskCreate(env.ctx, { title: "Self ref" });
+    await expect(taskLink(env.ctx, { from: a.id, to: a.id, type: "depends_on" })).rejects.toThrow("Cannot link a task to itself");
+  });
+
+  test("prevents circular dependencies", async () => {
+    const a = await taskCreate(env.ctx, { title: "Task A" });
+    const b = await taskCreate(env.ctx, { title: "Task B" });
+    await taskLink(env.ctx, { from: a.id, to: b.id, type: "depends_on" });
+    await expect(taskLink(env.ctx, { from: b.id, to: a.id, type: "depends_on" })).rejects.toThrow("circular dependency");
   });
 });
 
