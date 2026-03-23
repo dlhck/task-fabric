@@ -25,13 +25,6 @@ export async function withGitSync<T>(
 
   await reindex(store);
 
-  // Incrementally embed new/changed documents (only processes documents without embeddings)
-  try {
-    await embedAll(store);
-  } catch {
-    // Models may not be available — keyword search still works
-  }
-
   await git.add(".");
   await git.commit(message);
 
@@ -58,6 +51,9 @@ export async function withGitSync<T>(
   } catch (err) {
     throw new Error(`Git push failed after commit: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  // Embed new/changed documents after commit — fire-and-forget so it doesn't block responses
+  embedAll(store).catch(() => { /* models may not be available */ });
 
   return result;
 }
