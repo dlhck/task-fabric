@@ -15,7 +15,7 @@ Tasks live as plain markdown files organized by status:
 └── archived/2026-03/ # Old tasks (monthly subdirs)
 ```
 
-Each task has YAML frontmatter (id, title, status, priority, tags, due, assignee, dependencies) and a markdown body with free-form content and a `## Log` section for timestamped entries.
+Each task has YAML frontmatter (id, title, status, priority, tags, due, assignee, completed_at, waiting_on, dependencies) and a markdown body with free-form content and a `## Log` section for timestamped entries. Filenames include the task ID to prevent collisions on duplicate titles.
 
 Every mutation auto-commits to git and pushes to a remote, so all changes are versioned and recoverable.
 
@@ -24,9 +24,10 @@ Every mutation auto-commits to git and pushes to a remote, so all changes are ve
 | Category | Tools |
 |----------|-------|
 | **CRUD** | `task_create`, `task_get`, `task_update`, `task_delete`, `task_list` |
-| **Search** | `task_search` (keyword), `task_query` (search + filters) |
+| **Search** | `task_search` (keyword/semantic/hybrid + filters), `task_expand_query`, `task_structured_search` |
 | **Workflow** | `task_move`, `task_log`, `task_link`, `task_batch` |
-| **Views** | `task_dashboard`, `task_timeline`, `task_graph` |
+| **Views** | `task_dashboard`, `task_timeline`, `task_graph`, `task_summary`, `task_recent`, `task_completion_report` |
+| **Maintenance** | `task_auto_archive`, `task_reindex` |
 | **Sync** | `sync_status`, `sync_pull`, `sync_history`, `sync_diff`, `sync_restore` |
 | **Settings** | `settings_get`, `settings_update` |
 
@@ -155,7 +156,7 @@ bearer_token_env_var = "TASK_FABRIC_API_KEY"
 ## Tests
 
 ```bash
-bun test                          # All tests (149)
+bun test                          # All tests (159)
 bun test src/__tests__/e2e/       # E2E tests (MCP protocol + HTTP)
 bun test src/__tests__/tools/     # Integration tests
 ```
