@@ -8,6 +8,7 @@ const envSchema = z.object({
   GIT_USER_NAME: z.string().min(1),
   GIT_USER_EMAIL: z.string().min(1),
   PORT: z.coerce.number().int().min(1).max(65535).default(8181),
+  SERVER_URL: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -21,6 +22,7 @@ export function loadEnv(): Env {
     GIT_USER_NAME: process.env.GIT_USER_NAME,
     GIT_USER_EMAIL: process.env.GIT_USER_EMAIL,
     PORT: process.env.PORT ?? 8181,
+    SERVER_URL: process.env.SERVER_URL,
   });
 }
 

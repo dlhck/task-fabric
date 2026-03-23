@@ -1,10 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { loadEnv, resolveRepoUrl } from "./env.ts";
 import { initStore, reindex, embedAll, closeStore, type Store } from "./store.ts";
 import { initGit } from "./git.ts";
 import { readSettings } from "./settings.ts";
-import { authMiddleware } from "./auth.ts";
+import { TaskFabricOAuthProvider } from "./oauth-provider.ts";
+import { constantTimeEqual } from "./util.ts";
 import type { AppContext } from "./context.ts";
 import type { SimpleGit } from "simple-git";
 import { TASK_STATUSES } from "./types.ts";
@@ -12,6 +15,8 @@ import { z } from "zod/v4";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import simpleGit from "simple-git";
+import express from "express";
+import type { Request, Response } from "express";
 
 // Tool handlers
 import { taskCreate, taskGet, taskUpdate, taskDelete, taskList } from "./tools/crud.ts";
@@ -39,7 +44,6 @@ let statusMessage = "";
 export async function createServer() {
   const env = loadEnv();
   const tasksDir = env.TASKS_DIR;
-  const apiKey = env.API_KEY;
 
   // Clone or init git
   let git: SimpleGit;
@@ -305,97 +309,138 @@ export async function createServer() {
 
 // Only start the server if this file is run directly
 if (import.meta.main) {
-  const { createMcpInstance, env } = await createServer();
+  const { createMcpInstance, ctx, env } = await createServer();
+  const { store } = ctx;
+
+  const issuerUrl = new URL(env.SERVER_URL || `http://localhost:${env.PORT}`);
+  const mcpServerUrl = new URL("/mcp", issuerUrl);
+  const oauthProvider = new TaskFabricOAuthProvider(env.API_KEY);
 
   // Track sessions: transport + its dedicated MCP instance
-  const sessions = new Map<string, { transport: WebStandardStreamableHTTPServerTransport; mcp: McpServer }>();
+  const sessions = new Map<string, { transport: StreamableHTTPServerTransport; mcp: McpServer }>();
 
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, mcp-session-id",
-    "Access-Control-Expose-Headers": "mcp-session-id",
-  };
+  const app = express();
 
-  Bun.serve({
-    port: env.PORT,
-    async fetch(request) {
-      const url = new URL(request.url);
-
-      // Handle CORS preflight
-      if (request.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders });
-      }
-
-      if (url.pathname === "/health") {
-        return new Response(JSON.stringify({ status: serverStatus, message: statusMessage }), {
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        });
-      }
-
-      if (url.pathname === "/mcp") {
-        const authError = authMiddleware(request, env.API_KEY);
-        if (authError) {
-          // Add CORS headers to 401 so the browser can read the error
-          for (const [k, v] of Object.entries(corsHeaders)) {
-            authError.headers.set(k, v);
-          }
-          return authError;
-        }
-
-        // Check for existing session
-        const sessionId = request.headers.get("mcp-session-id");
-        if (sessionId && sessions.has(sessionId)) {
-          const session = sessions.get(sessionId)!;
-          const response = await session.transport.handleRequest(request);
-          for (const [k, v] of Object.entries(corsHeaders)) {
-            response.headers.set(k, v);
-          }
-          return response;
-        }
-
-        // New session — create a dedicated MCP instance + transport
-        const mcp = createMcpInstance();
-        const transport = new WebStandardStreamableHTTPServerTransport({
-          sessionIdGenerator: () => crypto.randomUUID(),
-          onsessioninitialized: (id) => {
-            sessions.set(id, { transport, mcp });
-          },
-        });
-
-        transport.onclose = () => {
-          for (const [id, s] of sessions) {
-            if (s.transport === transport) {
-              sessions.delete(id);
-              break;
-            }
-          }
-        };
-
-        await mcp.connect(transport);
-        const response = await transport.handleRequest(request);
-        for (const [k, v] of Object.entries(corsHeaders)) {
-          response.headers.set(k, v);
-        }
-        return response;
-      }
-
-      return new Response("Not Found", { status: 404, headers: corsHeaders });
-    },
+  // CORS for all routes
+  app.use((_req: Request, res: Response, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id");
+    res.header("Access-Control-Expose-Headers", "mcp-session-id");
+    if (_req.method === "OPTIONS") {
+      res.sendStatus(204);
+      return;
+    }
+    next();
   });
 
-  console.log(`TaskFabric MCP server running on port ${env.PORT}`);
+  // OAuth auth router — installs /.well-known/*, /authorize, /token, /register, /revoke
+  app.use(mcpAuthRouter({
+    provider: oauthProvider,
+    issuerUrl,
+    resourceServerUrl: mcpServerUrl,
+    resourceName: "Task Fabric",
+  }));
+
+  // Custom consent form handler
+  app.post("/authorize/decide", express.urlencoded({ extended: false }), (req: Request, res: Response) => {
+    const { api_key, client_id, redirect_uri, state, code_challenge, scope, resource, action } = req.body;
+
+    const redirectUrl = new URL(redirect_uri);
+
+    if (action === "deny") {
+      redirectUrl.searchParams.set("error", "access_denied");
+      if (state) redirectUrl.searchParams.set("state", state);
+      res.redirect(302, redirectUrl.toString());
+      return;
+    }
+
+    const code = oauthProvider.generateAuthorizationCode(
+      api_key ?? "",
+      client_id,
+      redirect_uri,
+      code_challenge,
+      scope ? scope.split(" ").filter(Boolean) : [],
+      resource || undefined,
+    );
+
+    if (!code) {
+      redirectUrl.searchParams.set("error", "access_denied");
+      redirectUrl.searchParams.set("error_description", "Invalid API key");
+      if (state) redirectUrl.searchParams.set("state", state);
+      res.redirect(302, redirectUrl.toString());
+      return;
+    }
+
+    redirectUrl.searchParams.set("code", code);
+    if (state) redirectUrl.searchParams.set("state", state);
+    res.redirect(302, redirectUrl.toString());
+  });
+
+  // Health endpoint
+  app.get("/health", (_req: Request, res: Response) => {
+    res.json({ status: serverStatus, message: statusMessage });
+  });
+
+  // Bearer auth middleware for MCP endpoint
+  const bearerAuth = requireBearerAuth({ verifier: oauthProvider });
+
+  // MCP endpoint — all methods
+  const mcpHandler = async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    // Reuse existing session
+    if (sessionId && sessions.has(sessionId)) {
+      const session = sessions.get(sessionId)!;
+      await session.transport.handleRequest(req, res);
+      return;
+    }
+
+    // Only POST can create a new session
+    if (req.method === "POST") {
+      const mcp = createMcpInstance();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+        onsessioninitialized: (id) => {
+          sessions.set(id, { transport, mcp });
+        },
+      });
+
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid && sessions.has(sid)) {
+          sessions.delete(sid);
+        }
+      };
+
+      await mcp.connect(transport);
+      await transport.handleRequest(req, res);
+      return;
+    }
+
+    res.status(400).json({ error: "No valid session" });
+  };
+
+  app.post("/mcp", bearerAuth, mcpHandler);
+  app.get("/mcp", bearerAuth, mcpHandler);
+  app.delete("/mcp", bearerAuth, mcpHandler);
+
+  const httpServer = app.listen(env.PORT, () => {
+    console.log(`TaskFabric MCP server running on port ${env.PORT}`);
+  });
 
   // Graceful shutdown
   const shutdown = async () => {
     console.log("Shutting down gracefully...");
     serverStatus = "error";
     statusMessage = "shutting down";
-    for (const [id, session] of sessions) {
+    for (const [_id, session] of sessions) {
       try { await session.transport.close(); } catch { /* best effort */ }
-      sessions.delete(id);
     }
+    sessions.clear();
+    oauthProvider.dispose();
     try { await closeStore(store); } catch { /* best effort */ }
+    httpServer.close();
     process.exit(0);
   };
 
