@@ -1,4 +1,4 @@
-import { createStore, type QMDStore, type HybridQueryResult } from "@tobilu/qmd";
+import { createStore, type QMDStore, type HybridQueryResult, type ExpandedQuery } from "@tobilu/qmd";
 import type { TaskStatus } from "./types.ts";
 import { TASK_STATUSES } from "./types.ts";
 
@@ -24,6 +24,22 @@ export interface SearchOptions {
   collections?: string[];
   limit?: number;
   includeArchived?: boolean;
+}
+
+export interface HybridSearchOptions extends SearchOptions {
+  intent?: string;
+  minScore?: number;
+  rerank?: boolean;
+}
+
+export interface StructuredSearchOptions {
+  queries: ExpandedQuery[];
+  collections?: string[];
+  limit?: number;
+  includeArchived?: boolean;
+  intent?: string;
+  minScore?: number;
+  rerank?: boolean;
 }
 
 export async function initStore(tasksDir: string, dbPath: string): Promise<Store> {
@@ -53,22 +69,72 @@ export async function embedAll(store: Store): Promise<void> {
   await store.embed({});
 }
 
-export async function searchTasks(
+export async function searchTasksHybrid(
   store: Store,
-  options: SearchOptions,
+  options: HybridSearchOptions,
 ): Promise<HybridQueryResult[]> {
   const searchCollections = options.collections
     ?? (options.includeArchived
       ? [...TASK_STATUSES]
       : TASK_STATUSES.filter((s) => s !== "archived"));
 
-  const results = await store.search({
+  return store.search({
     query: options.query,
     collections: searchCollections,
     limit: options.limit ?? 10,
+    intent: options.intent,
+    minScore: options.minScore,
+    rerank: options.rerank,
   });
+}
 
-  return results;
+export async function searchTasksVector(
+  store: Store,
+  options: SearchOptions,
+): Promise<QMDDocument[]> {
+  const targetCollections = options.collections
+    ?? (options.includeArchived
+      ? [...TASK_STATUSES]
+      : TASK_STATUSES.filter((s) => s !== "archived"));
+
+  const allResults: QMDDocument[] = [];
+  for (const collection of targetCollections) {
+    const results = await store.searchVector(options.query, {
+      limit: options.limit ?? 10,
+      collection,
+    });
+    allResults.push(...(results as unknown as QMDDocument[]));
+  }
+
+  allResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  return allResults.slice(0, options.limit ?? 10);
+}
+
+export async function expandTaskQuery(
+  store: Store,
+  query: string,
+  intent?: string,
+): Promise<ExpandedQuery[]> {
+  return store.expandQuery(query, { intent });
+}
+
+export async function structuredSearchTasks(
+  store: Store,
+  options: StructuredSearchOptions,
+): Promise<HybridQueryResult[]> {
+  const searchCollections = options.collections
+    ?? (options.includeArchived
+      ? [...TASK_STATUSES]
+      : TASK_STATUSES.filter((s) => s !== "archived"));
+
+  return store.search({
+    queries: options.queries,
+    collections: searchCollections,
+    limit: options.limit ?? 10,
+    intent: options.intent,
+    minScore: options.minScore,
+    rerank: options.rerank,
+  });
 }
 
 export async function searchTasksLex(

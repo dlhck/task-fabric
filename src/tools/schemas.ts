@@ -42,18 +42,40 @@ export const taskListSchema = z.object({
 
 export const taskSearchSchema = z.object({
   query: z.string().min(1),
-  limit: z.number().int().min(1).max(50).optional(),
-  includeArchived: z.boolean().optional(),
-});
-
-export const taskQuerySchema = z.object({
-  query: z.string().min(1),
+  mode: z.enum(["keyword", "semantic", "hybrid"]).optional(),
+  intent: z.string().optional(),
   status: z.enum(["inbox", "active", "waiting", "done", "archived"]).optional(),
   priority: z.enum(["low", "medium", "high", "critical"]).optional(),
   tag: z.string().optional(),
   assignee: z.string().optional(),
   project: z.string().optional(),
   limit: z.number().int().min(1).max(50).optional(),
+  minScore: z.number().min(0).max(1).optional(),
+  includeArchived: z.boolean().optional(),
+});
+
+const expandedQuerySchema = z.object({
+  type: z.enum(["lex", "vec", "hyde"]),
+  query: z.string().min(1),
+});
+
+export const taskExpandQuerySchema = z.object({
+  query: z.string().min(1),
+  intent: z.string().optional(),
+});
+
+export const taskStructuredSearchSchema = z.object({
+  queries: z.array(expandedQuerySchema).min(1),
+  intent: z.string().optional(),
+  status: z.enum(["inbox", "active", "waiting", "done", "archived"]).optional(),
+  priority: z.enum(["low", "medium", "high", "critical"]).optional(),
+  tag: z.string().optional(),
+  assignee: z.string().optional(),
+  project: z.string().optional(),
+  limit: z.number().int().min(1).max(50).optional(),
+  minScore: z.number().min(0).max(1).optional(),
+  rerank: z.boolean().optional(),
+  includeArchived: z.boolean().optional(),
 });
 
 export const taskMoveSchema = z.object({

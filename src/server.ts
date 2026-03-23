@@ -14,7 +14,7 @@ import simpleGit from "simple-git";
 
 // Tool handlers
 import { taskCreate, taskGet, taskUpdate, taskDelete, taskList } from "./tools/crud.ts";
-import { taskSearch, taskQuery } from "./tools/search.ts";
+import { taskSearch, taskExpandQuery, taskStructuredSearch } from "./tools/search.ts";
 import { taskMove, taskLog, taskLink, taskBatch } from "./tools/workflow.ts";
 import { taskDashboard, taskTimeline, taskGraph } from "./tools/views.ts";
 import { syncStatus, syncPull, syncHistory, syncDiff, syncRestore } from "./tools/sync.ts";
@@ -23,7 +23,7 @@ import { settingsGet, settingsUpdate } from "./tools/settings-tools.ts";
 // Schemas
 import {
   taskCreateSchema, taskGetSchema, taskUpdateSchema, taskDeleteSchema, taskListSchema,
-  taskSearchSchema, taskQuerySchema,
+  taskSearchSchema, taskExpandQuerySchema, taskStructuredSearchSchema,
   taskMoveSchema, taskLogSchema, taskLinkSchema, taskBatchSchema,
   taskDashboardSchema, taskTimelineSchema,
   syncHistorySchema, syncDiffSchema, syncRestoreSchema,
@@ -155,13 +155,27 @@ export async function createServer() {
       return { content: [{ type: "text", text: JSON.stringify(tasks) }] };
     });
 
-    mcp.registerTool("task_search", { description: "Search tasks with keywords", inputSchema: taskSearchSchema }, async (params) => {
+    mcp.registerTool("task_search", {
+      description: "Search tasks using natural language. Supports three modes: 'keyword' (BM25 lexical matching — fast, exact terms), 'semantic' (vector similarity — finds conceptually related tasks even without exact word matches), or 'hybrid' (keyword + semantic + LLM query expansion + reranking — best quality, slower). Default mode is 'hybrid'. Use 'intent' to steer search toward a specific domain or purpose. Supports filtering by status, priority, tag, assignee, and project.",
+      inputSchema: taskSearchSchema,
+    }, async (params) => {
       const results = await taskSearch(ctx, params);
       return { content: [{ type: "text", text: JSON.stringify(results) }] };
     });
 
-    mcp.registerTool("task_query", { description: "Search tasks with filters", inputSchema: taskQuerySchema }, async (params) => {
-      const results = await taskQuery(ctx, params);
+    mcp.registerTool("task_expand_query", {
+      description: "Expand a natural language query into typed sub-queries using the local LLM. Returns an array of queries typed as 'lex' (keyword/BM25), 'vec' (semantic/vector), or 'hyde' (hypothetical document embedding). Use this for full control over search strategy — inspect and modify the expansions, then pass them to task_structured_search.",
+      inputSchema: taskExpandQuerySchema,
+    }, async (params) => {
+      const results = await taskExpandQuery(ctx, params);
+      return { content: [{ type: "text", text: JSON.stringify(results) }] };
+    });
+
+    mcp.registerTool("task_structured_search", {
+      description: "Execute pre-expanded typed queries for maximum search control. Each query is routed by type: 'lex' routes to BM25 keyword index, 'vec' routes to vector similarity, 'hyde' generates a hypothetical document and embeds it. Results are fused via Reciprocal Rank Fusion and optionally reranked by LLM. Use after task_expand_query or craft your own query expansions for precise retrieval.",
+      inputSchema: taskStructuredSearchSchema,
+    }, async (params) => {
+      const results = await taskStructuredSearch(ctx, params);
       return { content: [{ type: "text", text: JSON.stringify(results) }] };
     });
 

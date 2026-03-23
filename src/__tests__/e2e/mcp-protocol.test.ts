@@ -12,9 +12,9 @@ afterAll(async () => {
 });
 
 describe("tool discovery", () => {
-  test("listTools returns all 20 registered tools", async () => {
+  test("listTools returns all registered tools", async () => {
     const { tools } = await e2e.client.listTools();
-    expect(tools.length).toBe(21);
+    expect(tools.length).toBe(22);
 
     const names = tools.map((t) => t.name).sort();
     expect(names).toContain("task_create");
@@ -23,7 +23,8 @@ describe("tool discovery", () => {
     expect(names).toContain("task_delete");
     expect(names).toContain("task_list");
     expect(names).toContain("task_search");
-    expect(names).toContain("task_query");
+    expect(names).toContain("task_expand_query");
+    expect(names).toContain("task_structured_search");
     expect(names).toContain("task_move");
     expect(names).toContain("task_log");
     expect(names).toContain("task_link");
@@ -203,13 +204,13 @@ describe("search tools", () => {
 
     const result = await e2e.client.callTool({
       name: "task_search",
-      arguments: { query: "xylophone" },
+      arguments: { query: "xylophone", mode: "keyword" },
     });
     const results = parseResult(result) as any[];
     expect(results.length).toBeGreaterThan(0);
   });
 
-  test("task_query filters results", async () => {
+  test("task_search filters results by priority", async () => {
     await e2e.client.callTool({
       name: "task_create",
       arguments: { title: "High priority zebra", priority: "high" },
@@ -220,8 +221,8 @@ describe("search tools", () => {
     });
 
     const result = await e2e.client.callTool({
-      name: "task_query",
-      arguments: { query: "zebra", priority: "high" },
+      name: "task_search",
+      arguments: { query: "zebra", mode: "keyword", priority: "high" },
     });
     const results = parseResult(result) as any[];
     expect(results.every((r: any) => r.priority === "high")).toBe(true);
