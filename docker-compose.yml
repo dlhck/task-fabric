@@ -11,6 +11,7 @@ services:
       - GIT_USER_NAME=${GIT_USER_NAME}
       - GIT_USER_EMAIL=${GIT_USER_EMAIL}
       - PORT=8181
+      - SERVER_URL=${SERVER_URL:-}
     volumes:
       - task-data:/data/tasks
     restart: unless-stopped

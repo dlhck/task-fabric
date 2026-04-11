@@ -1,10 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { loadEnv, resolveRepoUrl } from "./env.ts";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import { loadEnv, resolveRepoUrl, buildIssuerUrl } from "./env.ts";
 import { initStore, reindex, embedAll, closeStore, type Store } from "./store.ts";
 import { initGit } from "./git.ts";
 import { readSettings } from "./settings.ts";
-import { authMiddleware } from "./auth.ts";
+import { TaskFabricOAuthProvider } from "./oauth-provider.ts";
+import { FailureRateLimiter } from "./rate-limit.ts";
+import {
+  parseCookies,
+  buildSetConsentCookieHeader,
+  buildClearConsentCookieHeader,
+  CONSENT_COOKIE_NAME,
+} from "./consent-cookie.ts";
 import type { AppContext } from "./context.ts";
 import type { SimpleGit } from "simple-git";
 import { TASK_STATUSES } from "./types.ts";
@@ -12,6 +21,8 @@ import { z } from "zod/v4";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import simpleGit from "simple-git";
+import express from "express";
+import type { Request, Response } from "express";
 
 // Tool handlers
 import { taskCreate, taskGet, taskUpdate, taskDelete, taskList } from "./tools/crud.ts";
@@ -39,7 +50,6 @@ let statusMessage = "";
 export async function createServer() {
   const env = loadEnv();
   const tasksDir = env.TASKS_DIR;
-  const apiKey = env.API_KEY;
 
   // Clone or init git
   let git: SimpleGit;
@@ -96,12 +106,21 @@ export async function createServer() {
     await mkdir(path.join(tasksDir, status), { recursive: true });
   }
 
-  // Ensure .gitignore excludes QMD index
+  // Ensure .gitignore excludes QMD index and OAuth DB
   const gitignorePath = path.join(tasksDir, ".gitignore");
   const gitignoreFile = Bun.file(gitignorePath);
-  const gitignoreContent = (await gitignoreFile.exists()) ? await gitignoreFile.text() : "";
+  let gitignoreContent = (await gitignoreFile.exists()) ? await gitignoreFile.text() : "";
+  let gitignoreChanged = false;
   if (!gitignoreContent.includes(".qmd/")) {
-    await Bun.write(gitignorePath, gitignoreContent ? `${gitignoreContent.trimEnd()}\n.qmd/\n` : ".qmd/\n");
+    gitignoreContent = gitignoreContent ? `${gitignoreContent.trimEnd()}\n.qmd/\n` : ".qmd/\n";
+    gitignoreChanged = true;
+  }
+  if (!gitignoreContent.includes(".task-fabric.sqlite")) {
+    gitignoreContent = `${gitignoreContent.trimEnd()}\n.task-fabric.sqlite\n`;
+    gitignoreChanged = true;
+  }
+  if (gitignoreChanged) {
+    await Bun.write(gitignorePath, gitignoreContent);
   }
 
   // Init store
@@ -303,99 +322,228 @@ export async function createServer() {
   return { createMcpInstance, ctx, env };
 }
 
-// Only start the server if this file is run directly
-if (import.meta.main) {
-  const { createMcpInstance, env } = await createServer();
+export interface CreateAppOptions {
+  createMcpInstance: () => McpServer;
+  oauthProvider: TaskFabricOAuthProvider;
+  issuerUrl: URL;
+  getServerStatus?: () => { status: string; message: string };
+  /** Number of reverse-proxy hops to trust for X-Forwarded-For / X-Forwarded-Proto. Defaults to 1. */
+  trustProxyHops?: number;
+  /** Failure rate limiter for POST /authorize/decide. Tests may pass a short-window one. */
+  authorizeDecideRateLimiter?: FailureRateLimiter;
+}
 
-  // Track sessions: transport + its dedicated MCP instance
-  const sessions = new Map<string, { transport: WebStandardStreamableHTTPServerTransport; mcp: McpServer }>();
+/**
+ * Creates the Express app with OAuth, MCP, and health endpoints.
+ * Shared between production server and tests.
+ */
+export function createApp({
+  createMcpInstance,
+  oauthProvider,
+  issuerUrl,
+  getServerStatus,
+  trustProxyHops = 1,
+  authorizeDecideRateLimiter,
+}: CreateAppOptions) {
+  const mcpServerUrl = new URL("/mcp", issuerUrl);
+  const sessions = new Map<string, { transport: StreamableHTTPServerTransport; mcp: McpServer }>();
+  const rateLimiter = authorizeDecideRateLimiter ?? new FailureRateLimiter();
+  // Cookie Secure flag tracks the issuer scheme. Over HTTPS the cookie is
+  // marked Secure; over http://localhost it isn't, because browsers drop
+  // Secure cookies on non-https responses and we'd silently lose the session.
+  const cookieSecure = issuerUrl.protocol === "https:";
 
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, mcp-session-id",
-    "Access-Control-Expose-Headers": "mcp-session-id",
-  };
+  const app = express();
 
-  Bun.serve({
-    port: env.PORT,
-    async fetch(request) {
-      const url = new URL(request.url);
+  // Reverse proxy awareness — controls req.ip and req.protocol resolution.
+  // Default 1 covers the common "one proxy in front of the container" case.
+  // Bump TRUST_PROXY_HOPS if you chain proxies (e.g. Cloudflare → Caddy → container).
+  app.set("trust proxy", trustProxyHops);
 
-      // Handle CORS preflight
-      if (request.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders });
-      }
-
-      if (url.pathname === "/health") {
-        return new Response(JSON.stringify({ status: serverStatus, message: statusMessage }), {
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        });
-      }
-
-      if (url.pathname === "/mcp") {
-        const authError = authMiddleware(request, env.API_KEY);
-        if (authError) {
-          // Add CORS headers to 401 so the browser can read the error
-          for (const [k, v] of Object.entries(corsHeaders)) {
-            authError.headers.set(k, v);
-          }
-          return authError;
-        }
-
-        // Check for existing session
-        const sessionId = request.headers.get("mcp-session-id");
-        if (sessionId && sessions.has(sessionId)) {
-          const session = sessions.get(sessionId)!;
-          const response = await session.transport.handleRequest(request);
-          for (const [k, v] of Object.entries(corsHeaders)) {
-            response.headers.set(k, v);
-          }
-          return response;
-        }
-
-        // New session — create a dedicated MCP instance + transport
-        const mcp = createMcpInstance();
-        const transport = new WebStandardStreamableHTTPServerTransport({
-          sessionIdGenerator: () => crypto.randomUUID(),
-          onsessioninitialized: (id) => {
-            sessions.set(id, { transport, mcp });
-          },
-        });
-
-        transport.onclose = () => {
-          for (const [id, s] of sessions) {
-            if (s.transport === transport) {
-              sessions.delete(id);
-              break;
-            }
-          }
-        };
-
-        await mcp.connect(transport);
-        const response = await transport.handleRequest(request);
-        for (const [k, v] of Object.entries(corsHeaders)) {
-          response.headers.set(k, v);
-        }
-        return response;
-      }
-
-      return new Response("Not Found", { status: 404, headers: corsHeaders });
-    },
+  // CORS for all routes
+  app.use((_req: Request, res: Response, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id");
+    res.header("Access-Control-Expose-Headers", "mcp-session-id");
+    if (_req.method === "OPTIONS") {
+      res.sendStatus(204);
+      return;
+    }
+    next();
   });
 
-  console.log(`TaskFabric MCP server running on port ${env.PORT}`);
+  // OAuth auth router — installs /.well-known/*, /authorize, /token, /register, /revoke
+  app.use(mcpAuthRouter({
+    provider: oauthProvider,
+    issuerUrl,
+    resourceServerUrl: mcpServerUrl,
+    resourceName: "Task Fabric",
+  }));
+
+  // Custom consent form handler
+  app.post("/authorize/decide", express.urlencoded({ extended: false }), async (req: Request, res: Response) => {
+    const { api_key, client_id, redirect_uri, state, code_challenge, scope, resource, action } = req.body;
+
+    // Rate limit check — block BEFORE we do any crypto work so attackers can't
+    // just burn CPU on a locked-out IP. req.ip respects trust proxy and is
+    // always populated by Express when trust proxy is set (which we do above).
+    const gate = rateLimiter.check(req.ip);
+    if (gate.blocked) {
+      res.status(429)
+        .set("Retry-After", String(gate.retryAfterSeconds))
+        .type("text/plain")
+        .send("Too many failed attempts. Try again later.");
+      return;
+    }
+
+    // Validate redirect_uri against the registered client before any redirect
+    const client = await oauthProvider.validateClientRedirect(client_id, redirect_uri);
+    if (!client) {
+      res.status(400).json({ error: "invalid_request", error_description: "Unknown client or unregistered redirect_uri" });
+      return;
+    }
+
+    const redirectUrl = new URL(redirect_uri);
+    const cookies = parseCookies(req.headers.cookie);
+    const rawCookie = cookies[CONSENT_COOKIE_NAME];
+    const hasTrustedCookie = rawCookie ? oauthProvider.verifyConsentCookieValue(rawCookie) : false;
+
+    if (action === "deny") {
+      // Clearing the cookie on deny matches user intuition: pressing Deny means
+      // "don't trust this browser" — so the next authorize flow re-prompts.
+      res.setHeader("Set-Cookie", buildClearConsentCookieHeader({ secure: cookieSecure }));
+      redirectUrl.searchParams.set("error", "access_denied");
+      if (state) redirectUrl.searchParams.set("state", state);
+      res.redirect(302, redirectUrl.toString());
+      return;
+    }
+
+    const scopes = scope ? scope.split(" ").filter(Boolean) : [];
+    const resourceVal = resource || undefined;
+
+    let code: string | null;
+    let setFreshCookie = false;
+
+    if (hasTrustedCookie) {
+      // Cookie is proof of prior API key validation — skip the check.
+      code = oauthProvider.issueAuthorizationCode(client_id, redirect_uri, code_challenge, scopes, resourceVal);
+      setFreshCookie = true; // rolling extension on every approve
+    } else {
+      code = oauthProvider.generateAuthorizationCode(api_key ?? "", client_id, redirect_uri, code_challenge, scopes, resourceVal);
+      if (code) setFreshCookie = true; // issuing the cookie for the first time
+    }
+
+    if (!code) {
+      // Only wrong-API-key attempts count toward the limit. A legit user who
+      // types their key right on the first try is never rate limited.
+      rateLimiter.recordFailure(req.ip);
+      redirectUrl.searchParams.set("error", "access_denied");
+      redirectUrl.searchParams.set("error_description", "Invalid API key");
+      if (state) redirectUrl.searchParams.set("state", state);
+      res.redirect(302, redirectUrl.toString());
+      return;
+    }
+
+    if (setFreshCookie) {
+      const { value, maxAgeSec } = oauthProvider.signFreshConsentCookie();
+      res.setHeader("Set-Cookie", buildSetConsentCookieHeader(value, { maxAgeSec, secure: cookieSecure }));
+    }
+
+    redirectUrl.searchParams.set("code", code);
+    if (state) redirectUrl.searchParams.set("state", state);
+    res.redirect(302, redirectUrl.toString());
+  });
+
+  // Health endpoint
+  app.get("/health", (_req: Request, res: Response) => {
+    const status = getServerStatus?.() ?? { status: "ready", message: "" };
+    res.json(status);
+  });
+
+  // Bearer auth middleware for MCP endpoint
+  const bearerAuth = requireBearerAuth({ verifier: oauthProvider });
+
+  // MCP endpoint — all methods
+  const mcpHandler = async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    // Reuse existing session
+    if (sessionId && sessions.has(sessionId)) {
+      const session = sessions.get(sessionId)!;
+      await session.transport.handleRequest(req, res);
+      return;
+    }
+
+    // Only POST can create a new session
+    if (req.method === "POST") {
+      const mcp = createMcpInstance();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+        onsessioninitialized: (id) => {
+          sessions.set(id, { transport, mcp });
+        },
+      });
+
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid && sessions.has(sid)) {
+          sessions.delete(sid);
+        }
+      };
+
+      await mcp.connect(transport);
+      await transport.handleRequest(req, res);
+      return;
+    }
+
+    res.status(400).json({ error: "No valid session" });
+  };
+
+  app.post("/mcp", bearerAuth, mcpHandler);
+  app.get("/mcp", bearerAuth, mcpHandler);
+  app.delete("/mcp", bearerAuth, mcpHandler);
+
+  return { app, sessions, rateLimiter };
+}
+
+// Only start the server if this file is run directly
+if (import.meta.main) {
+  const { createMcpInstance, ctx, env } = await createServer();
+  const { store } = ctx;
+
+  const issuerUrl = buildIssuerUrl(env);
+  const oauthDbPath = path.join(env.TASKS_DIR, ".task-fabric.sqlite");
+  const oauthProvider = new TaskFabricOAuthProvider(env.API_KEY, oauthDbPath);
+
+  const { app, sessions, rateLimiter } = createApp({
+    createMcpInstance,
+    oauthProvider,
+    issuerUrl,
+    trustProxyHops: env.TRUST_PROXY_HOPS,
+    getServerStatus: () => ({ status: serverStatus, message: statusMessage }),
+  });
+
+  // Periodic sweep of the rate limiter so long-dormant IPs don't linger in memory.
+  const rateLimiterSweep = setInterval(() => rateLimiter.sweep(), 15 * 60 * 1000);
+
+  const httpServer = app.listen(env.PORT, () => {
+    console.log(`TaskFabric MCP server running on port ${env.PORT}`);
+  });
 
   // Graceful shutdown
   const shutdown = async () => {
     console.log("Shutting down gracefully...");
     serverStatus = "error";
     statusMessage = "shutting down";
-    for (const [id, session] of sessions) {
+    clearInterval(rateLimiterSweep);
+    for (const [_id, session] of sessions) {
       try { await session.transport.close(); } catch { /* best effort */ }
-      sessions.delete(id);
     }
+    sessions.clear();
+    oauthProvider.dispose();
     try { await closeStore(store); } catch { /* best effort */ }
+    httpServer.close();
     process.exit(0);
   };
 
