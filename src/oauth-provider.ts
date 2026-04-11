@@ -12,6 +12,13 @@ import { InvalidRequestError, InvalidTokenError, InvalidGrantError } from "@mode
 import { constantTimeEqual } from "./util.ts";
 import { renderAuthorizePage } from "./authorize-page.ts";
 import { OAuthStore } from "./oauth-store.ts";
+import {
+  parseCookies,
+  verifyConsentCookie,
+  signConsentCookie,
+  CONSENT_COOKIE_NAME,
+  CONSENT_COOKIE_TTL_MS,
+} from "./consent-cookie.ts";
 
 // TTLs
 const AUTH_CODE_TTL = 10 * 60 * 1000; // 10 minutes
@@ -27,13 +34,6 @@ interface AuthCode {
   scopes: string[];
   resource?: URL;
   expiresAt: number;
-}
-
-interface AccessTokenRecord {
-  clientId: string;
-  scopes: string[];
-  expiresAt: number;
-  resource?: URL;
 }
 
 // --- Clients Store (SQLite-backed) ---
@@ -63,14 +63,18 @@ export class PersistentClientsStore implements OAuthRegisteredClientsStore {
 export class TaskFabricOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: PersistentClientsStore;
   private readonly store: OAuthStore;
-  // Auth codes and access tokens are short-lived — in-memory is fine
+  // Auth codes are one-shot + short-lived — losing them on restart just
+  // means the user retries the consent flow. Not worth persisting.
   private codes = new Map<string, AuthCode>();
-  private accessTokens = new Map<string, AccessTokenRecord>();
   private cleanupTimer: ReturnType<typeof setInterval>;
 
   constructor(private readonly apiKey: string, dbPath: string) {
     this.store = new OAuthStore(dbPath);
     this.clientsStore = new PersistentClientsStore(this.store);
+    // Drop any stale rows left over from the previous process before
+    // serving traffic, so a long-stopped server doesn't boot with
+    // thousands of dead tokens cluttering the DB.
+    this.store.sweepExpired();
     this.cleanupTimer = setInterval(() => this.sweep(), CLEANUP_INTERVAL);
   }
 
@@ -83,6 +87,14 @@ export class TaskFabricOAuthProvider implements OAuthServerProvider {
       throw new InvalidRequestError("Unregistered redirect_uri");
     }
 
+    // Check if this browser already presented a valid consent cookie.
+    // If so, render the simpler "one-click Approve" variant (option b).
+    // res.req is always the originating Express request — no defensive chain needed.
+    const cookies = parseCookies(res.req.headers.cookie);
+    const trusted = cookies[CONSENT_COOKIE_NAME]
+      ? verifyConsentCookie(this.apiKey, cookies[CONSENT_COOKIE_NAME])
+      : false;
+
     const html = renderAuthorizePage({
       clientName: client.client_name ?? client.client_id,
       clientId: client.client_id,
@@ -91,9 +103,30 @@ export class TaskFabricOAuthProvider implements OAuthServerProvider {
       codeChallenge: params.codeChallenge,
       scope: params.scopes?.join(" ") ?? "",
       resource: params.resource?.toString() ?? "",
+      trusted,
     });
 
     res.status(200).type("html").send(html);
+  }
+
+  /**
+   * Mints a fresh consent cookie signed with the current API key.
+   * Returns both the opaque value and the TTL in seconds (for Max-Age).
+   */
+  signFreshConsentCookie(): { value: string; maxAgeSec: number } {
+    const expiresAtMs = Date.now() + CONSENT_COOKIE_TTL_MS;
+    return {
+      value: signConsentCookie(this.apiKey, expiresAtMs),
+      maxAgeSec: Math.floor(CONSENT_COOKIE_TTL_MS / 1000),
+    };
+  }
+
+  /**
+   * Verifies a consent cookie value. Checks signature + expiry.
+   * Returns true only if both are valid.
+   */
+  verifyConsentCookieValue(raw: string): boolean {
+    return verifyConsentCookie(this.apiKey, raw);
   }
 
   /**
@@ -123,7 +156,31 @@ export class TaskFabricOAuthProvider implements OAuthServerProvider {
     if (!constantTimeEqual(apiKeyAttempt, this.apiKey)) {
       return null;
     }
+    return this.createCode(clientId, redirectUri, codeChallenge, scopes, resource);
+  }
 
+  /**
+   * Mints an authorization code without re-checking the API key. Called from
+   * the /authorize/decide handler when a valid consent cookie is already present
+   * — the cookie is itself proof of prior API key validation.
+   */
+  issueAuthorizationCode(
+    clientId: string,
+    redirectUri: string,
+    codeChallenge: string,
+    scopes: string[],
+    resource?: string,
+  ): string {
+    return this.createCode(clientId, redirectUri, codeChallenge, scopes, resource);
+  }
+
+  private createCode(
+    clientId: string,
+    redirectUri: string,
+    codeChallenge: string,
+    scopes: string[],
+    resource?: string,
+  ): string {
     const code = randomUUID();
     this.codes.set(code, {
       codeChallenge,
@@ -167,12 +224,13 @@ export class TaskFabricOAuthProvider implements OAuthServerProvider {
     const accessToken = randomUUID();
     const refreshToken = randomUUID();
 
-    this.accessTokens.set(accessToken, {
-      clientId: client.client_id,
-      scopes: codeData.scopes,
-      expiresAt: Date.now() + ACCESS_TOKEN_TTL,
-      resource: codeData.resource,
-    });
+    this.store.saveAccessToken(
+      accessToken,
+      client.client_id,
+      codeData.scopes.join(" "),
+      Date.now() + ACCESS_TOKEN_TTL,
+      codeData.resource?.toString(),
+    );
 
     this.store.saveRefreshToken(
       refreshToken,
@@ -222,12 +280,13 @@ export class TaskFabricOAuthProvider implements OAuthServerProvider {
     const newAccessToken = randomUUID();
     const newRefreshToken = randomUUID();
 
-    this.accessTokens.set(newAccessToken, {
-      clientId: client.client_id,
-      scopes: effectiveScopes,
-      expiresAt: Date.now() + ACCESS_TOKEN_TTL,
-      resource: tokenData.resource ? new URL(tokenData.resource) : undefined,
-    });
+    this.store.saveAccessToken(
+      newAccessToken,
+      client.client_id,
+      effectiveScopes.join(" "),
+      Date.now() + ACCESS_TOKEN_TTL,
+      tokenData.resource,
+    );
 
     this.store.saveRefreshToken(
       newRefreshToken,
@@ -257,7 +316,7 @@ export class TaskFabricOAuthProvider implements OAuthServerProvider {
       };
     }
 
-    const tokenData = this.accessTokens.get(token);
+    const tokenData = this.store.getAccessToken(token);
     if (!tokenData || tokenData.expiresAt < Date.now()) {
       throw new InvalidTokenError("Invalid or expired access token");
     }
@@ -265,9 +324,9 @@ export class TaskFabricOAuthProvider implements OAuthServerProvider {
     return {
       token,
       clientId: tokenData.clientId,
-      scopes: tokenData.scopes,
+      scopes: tokenData.scopes ? tokenData.scopes.split(" ").filter(Boolean) : [],
       expiresAt: Math.floor(tokenData.expiresAt / 1000),
-      resource: tokenData.resource,
+      resource: tokenData.resource ? new URL(tokenData.resource) : undefined,
     };
   }
 
@@ -275,7 +334,7 @@ export class TaskFabricOAuthProvider implements OAuthServerProvider {
     _client: OAuthClientInformationFull,
     request: OAuthTokenRevocationRequest,
   ): Promise<void> {
-    this.accessTokens.delete(request.token);
+    this.store.deleteAccessToken(request.token);
     this.store.deleteRefreshToken(request.token);
   }
 
@@ -284,9 +343,6 @@ export class TaskFabricOAuthProvider implements OAuthServerProvider {
     const now = Date.now();
     for (const [key, val] of this.codes) {
       if (val.expiresAt < now) this.codes.delete(key);
-    }
-    for (const [key, val] of this.accessTokens) {
-      if (val.expiresAt < now) this.accessTokens.delete(key);
     }
     this.store.sweepExpired();
   }

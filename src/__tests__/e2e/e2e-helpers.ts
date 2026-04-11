@@ -8,6 +8,9 @@ import path from "node:path";
 import { TASK_STATUSES } from "../../types.ts";
 import simpleGit from "simple-git";
 
+/** Shared test API key — exactly 40 chars so it satisfies the min(32) rule with slack. */
+export const TEST_API_KEY = "test-api-key-0123456789abcdef0123456789abcd";
+
 const ENV_KEYS = ["TASKS_DIR", "API_KEY", "GIT_USER_NAME", "GIT_USER_EMAIL", "TASKS_REPO_URL", "GIT_TOKEN"] as const;
 
 export interface E2EContext {
@@ -44,7 +47,7 @@ export async function createTestTasksDir(): Promise<{ tasksDir: string; tmpDir: 
   await git.commit("init");
 
   process.env.TASKS_DIR = tasksDir;
-  process.env.API_KEY = "test-api-key-12345";
+  process.env.API_KEY = TEST_API_KEY;
   process.env.GIT_USER_NAME = "E2E Test";
   process.env.GIT_USER_EMAIL = "e2e@test.local";
   delete process.env.TASKS_REPO_URL;
@@ -82,4 +85,59 @@ export function parseResult(result: { content: Array<{ type: string; text?: stri
   const text = result.content[0];
   if (!text || text.type !== "text" || !text.text) throw new Error("Expected text content");
   return JSON.parse(text.text);
+}
+
+/** Parameters accepted by POST /authorize/decide. */
+export interface AuthorizeDecideParams {
+  api_key?: string;
+  client_id: string;
+  redirect_uri: string;
+  state?: string;
+  code_challenge: string;
+  scope?: string;
+  resource?: string;
+  action: "approve" | "deny";
+}
+
+/**
+ * POSTs to /authorize/decide with the standard content type and optional
+ * cookie + X-Forwarded-For override. Always uses manual redirect handling
+ * so tests can inspect the 302 Location directly.
+ */
+export function postAuthorizeDecide(
+  baseUrl: string,
+  params: AuthorizeDecideParams,
+  opts: { cookie?: string; xForwardedFor?: string } = {},
+): Promise<Response> {
+  const headers: Record<string, string> = { "Content-Type": "application/x-www-form-urlencoded" };
+  if (opts.cookie) headers["Cookie"] = opts.cookie;
+  if (opts.xForwardedFor) headers["X-Forwarded-For"] = opts.xForwardedFor;
+
+  const body = new URLSearchParams({
+    api_key: params.api_key ?? "",
+    client_id: params.client_id,
+    redirect_uri: params.redirect_uri,
+    state: params.state ?? "",
+    code_challenge: params.code_challenge,
+    scope: params.scope ?? "",
+    resource: params.resource ?? "",
+    action: params.action,
+  });
+
+  return fetch(`${baseUrl}/authorize/decide`, {
+    method: "POST",
+    headers,
+    body: body.toString(),
+    redirect: "manual",
+  });
+}
+
+/**
+ * Extracts the tf_consent cookie from a Set-Cookie response header in a form
+ * suitable for resending as a Cookie request header. Returns null if absent.
+ */
+export function extractConsentCookie(setCookieHeader: string | null): string | null {
+  if (!setCookieHeader) return null;
+  const match = setCookieHeader.match(/tf_consent=([^;]*)/);
+  return match ? `tf_consent=${match[1]}` : null;
 }
